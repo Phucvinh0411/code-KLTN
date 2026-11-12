@@ -5,6 +5,10 @@
 $RootDir = $PSScriptRoot
 Set-Location $RootDir
 
+# Đảm bảo dùng đúng credential Phucvinh0411 và không bị treo popup
+git config credential.https://github.com.username Phucvinh0411
+$env:GCM_INTERACTIVE = "never"
+
 $ChildRepos = @(
     "backhaulbid-core-services",
     "backhaulbid-driver-app",
