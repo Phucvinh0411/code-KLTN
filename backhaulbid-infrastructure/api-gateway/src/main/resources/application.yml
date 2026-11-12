@@ -1,0 +1,170 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      # The gateway sets CORS itself (globalcors below). Socket.IO services also add their own
+      # Access-Control-* headers, and browsers reject a response that carries two values.
+      # Keep only the gateway's header.
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials, RETAIN_FIRST
+      routes:
+        - id: identity-service-openapi
+          uri: lb://identity-service
+          predicates:
+            - Path=/v3/api-docs/identity-service
+          filters:
+            - SetPath=/v3/api-docs
+        - id: fleet-service-openapi
+          uri: lb://fleet-service
+          predicates:
+            - Path=/v3/api-docs/fleet-service
+          filters:
+            - SetPath=/v3/api-docs
+        - id: wallet-service-openapi
+          uri: lb://wallet-service
+          predicates:
+            - Path=/v3/api-docs/wallet-service
+          filters:
+            - SetPath=/v3/api-docs
+        - id: media-service-openapi
+          uri: lb://media-service
+          predicates:
+            - Path=/v3/api-docs/media-service
+          filters:
+            - SetPath=/v3/api-docs
+        - id: contract-service-openapi
+          uri: lb://contract-service
+          predicates:
+            - Path=/v3/api-docs/contract-service
+          filters:
+            - SetPath=/v3/api-docs
+        - id: notification-service-openapi
+          uri: lb://notification-service
+          predicates:
+            - Path=/v3/api-docs/notification-service
+          filters:
+            - SetPath=/v3/api-docs
+        - id: bidding-service-openapi
+          uri: http://bidding-service:3001
+          predicates:
+            - Path=/v3/api-docs/bidding-service
+          filters:
+            - SetPath=/swagger-json
+        - id: identity-service
+          uri: lb://identity-service
+          predicates:
+            - Path=/api/v1/auth/**,/api/v1/representative-verifications/**,/api/v1/business-verifications/**,/api/v1/cargo-liability/**,/api/v1/accounts/**,/api/v1/users/**,/api/v1/addresses/**,/api/v1/admin/accounts/**,/api/v1/admin/settings/**,/api/v1/admin/representative-verifications/**
+        - id: fleet-service
+          uri: lb://fleet-service
+          predicates:
+            - Path=/api/v1/fleet/**,/api/v1/vehicles/**,/api/v1/drivers/**,/api/v1/admin/fleet/**,/api/v1/empty-routes/**
+        - id: wallet-service
+          uri: lb://wallet-service
+          predicates:
+            - Path=/api/v1/wallet/**,/api/v1/wallets/**,/api/v1/transactions/**,/api/v1/payments/sepay/**,/api/v1/admin/wallet-withdrawals/**,/api/v1/admin/sepay/**,/api/v1/admin/wallets/**
+        - id: contract-service
+          uri: lb://contract-service
+          predicates:
+            - Path=/api/v1/contracts/**,/api/v1/trips/**,/api/v1/complaints/**,/api/v1/carrier-reviews/**,/api/v1/claims/**
+        - id: notification-service
+          uri: http://notification-service:3002
+          predicates:
+            - Path=/api/v1/notifications/**
+        - id: notification-socket
+          uri: http://notification-service:3002
+          predicates:
+            - Path=/notification-socket/**
+        - id: media-service
+          uri: lb://media-service
+          predicates:
+            - Path=/api/v1/media/**
+        - id: bidding-service
+          uri: http://bidding-service:3001
+          predicates:
+            - Path=/api/v1/bidding/**,/api/v1/bids/**
+        - id: bidding-socket
+          uri: http://bidding-service:3001
+          predicates:
+            - Path=/bidding-socket/**
+        # Catch-all: mọi request không khớp API sẽ được chuyển đến Web Portal
+        - id: web-portal
+          uri: http://web-portal:3000
+          order: 1000
+          predicates:
+            - Path=/**
+      globalcors:
+        add-to-simple-url-handler-mapping: true
+        cors-configurations:
+          '[/**]':
+            allowedOrigins:
+              - ${FRONTEND_ORIGIN:http://localhost:3000}
+              - ${FRONTEND_LAN_ORIGIN:http://192.168.1.25:3000}
+              - ${EXPO_WEB_ORIGIN:http://localhost:3002}
+              - ${EXPO_LAN_ORIGIN:http://192.168.1.25:3002}
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - PATCH
+              - DELETE
+              - OPTIONS
+            allowedHeaders:
+              - Authorization
+              - Content-Type
+              - Accept
+              - Origin
+              # Auction creation sends an idempotency key so a retried request cannot create twice.
+              - X-Idempotency-Key
+            allowCredentials: true
+            maxAge: 3600
+
+
+eureka:
+  client:
+    registry-fetch-interval-seconds: 5
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+  instance:
+    prefer-ip-address: true
+
+app:
+  jwt:
+    secret: ${JWT_SECRET}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+springdoc:
+  api-docs:
+    enabled: ${SWAGGER_ENABLED:false}
+  swagger-ui:
+    enabled: ${SWAGGER_ENABLED:false}
+    path: /swagger-ui.html
+    disable-swagger-default-url: true
+    urls-primary-name: Identity Service
+    urls:
+      - name: Identity Service
+        url: /v3/api-docs/identity-service
+      - name: Fleet Service
+        url: /v3/api-docs/fleet-service
+      - name: Wallet Service
+        url: /v3/api-docs/wallet-service
+      - name: Contract Service
+        url: /v3/api-docs/contract-service
+      - name: Notification Service
+        url: /v3/api-docs/notification-service
+      - name: Bidding Service
+        url: /v3/api-docs/bidding-service
+      - name: Media Service
+        url: /v3/api-docs/media-service

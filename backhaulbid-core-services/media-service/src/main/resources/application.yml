@@ -1,0 +1,30 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: media-service
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+  instance:
+    prefer-ip-address: true
+
+aws:
+  s3:
+    region: ${AWS_REGION:ap-southeast-1}
+    bucket-name: ${AWS_S3_BUCKET:backhaulbid-media}
+    access-key: ${AWS_ACCESS_KEY_ID:mock-key}
+    secret-key: ${AWS_SECRET_ACCESS_KEY:mock-secret}
+
+# Driver-session media checks ask contract (V3.1); the token never leaves the backend.
+app:
+  contract:
+    url: ${CONTRACT_SERVICE_URL:http://contract-service:8080}
+  internal-token: ${INTERNAL_SERVICE_TOKEN:}

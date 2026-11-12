@@ -1,0 +1,793 @@
+"use client";
+
+import { useState, useEffect, useMemo } from "react";
+import Link from "next/link";
+import Box from "@mui/material/Box";
+import Alert from "@mui/material/Alert";
+import CircularProgress from "@mui/material/CircularProgress";
+import Card from "@mui/material/Card";
+import CardContent from "@mui/material/CardContent";
+import Typography from "@mui/material/Typography";
+import Button from "@mui/material/Button";
+import Grid from "@mui/material/Grid";
+import TextField from "@mui/material/TextField";
+import IconButton from "@mui/material/IconButton";
+import InputAdornment from "@mui/material/InputAdornment";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableContainer from "@mui/material/TableContainer";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import Paper from "@mui/material/Paper";
+import Chip from "@mui/material/Chip";
+import Pagination from "@mui/material/Pagination";
+import TableSortLabel from "@mui/material/TableSortLabel";
+import Select from "@mui/material/Select";
+import MenuItem from "@mui/material/MenuItem";
+import FormControl from "@mui/material/FormControl";
+import InputLabel from "@mui/material/InputLabel";
+import Tooltip from "@mui/material/Tooltip";
+import Tabs from "@mui/material/Tabs";
+import Tab from "@mui/material/Tab";
+
+// Icons
+import SearchIcon from "@mui/icons-material/SearchOutlined";
+import GavelIcon from "@mui/icons-material/GavelOutlined";
+import AccessTimeIcon from "@mui/icons-material/AccessTimeOutlined";
+import MonetizationOnIcon from "@mui/icons-material/MonetizationOnOutlined";
+import CheckCircleIcon from "@mui/icons-material/CheckCircleOutlineOutlined";
+import VisibilityIcon from "@mui/icons-material/VisibilityOutlined";
+import FilterListIcon from "@mui/icons-material/FilterListOutlined";
+import LocalShippingIcon from "@mui/icons-material/LocalShippingOutlined";
+import DescriptionIcon from "@mui/icons-material/DescriptionOutlined";
+import ClearIcon from "@mui/icons-material/ClearOutlined";
+
+import PageHeader from "@/components/common/PageHeader";
+import { useGlobalNotification } from "@/components/common/NotificationPopup";
+import { auctionService } from "@/services/auctionService";
+import { mapBackendToShipment } from "@/services/shipperAuctionMapper";
+
+const getTrackingHref = (shipment) =>
+  shipment?.tripId
+    ? `/shipper/tracking?id=${encodeURIComponent(shipment.tripId)}`
+    : "/shipper/tracking";
+
+export default function BiddingHistoryListScreen() {
+  const { notify } = useGlobalNotification();
+  const [shipments, setShipments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+
+  // Search & Filter State
+  const [searchTerm, setSearchTerm] = useState("");
+  const [statusTab, setStatusTab] = useState("all");
+  const [originFilter, setOriginFilter] = useState("all");
+  const [destFilter, setDestFilter] = useState("all");
+  const [order, setOrder] = useState("desc");
+  const [orderBy, setOrderBy] = useState("dateCreated");
+  
+  // Pagination State
+  const [page, setPage] = useState(1);
+  const [rowsPerPage, setRowsPerPage] = useState(5);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    auctionService.getShipperAuctions()
+      .then((response) => {
+        if (!active) return;
+        const auctionsData = Array.isArray(response)
+          ? response
+          : (response?.data?.data || response?.data?.content || response?.content || response?.data || []);
+        setShipments(auctionsData.map(mapBackendToShipment));
+      })
+      .catch(() => {
+        if (active) {
+          const message = "Không thể tải lịch sử đấu giá.";
+          setLoadError(message);
+          notify.error(message);
+        }
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [notify]);
+
+  const [columnsList, setColumnsList] = useState([
+    { id: "id", label: "Mã lô hàng", align: "left" },
+    { id: "goodsType", label: "Hàng hóa & Quy cách", align: "left" },
+    { id: "route", label: "Lộ trình vận chuyển", align: "left" },
+    { id: "maxPrice", label: "Giá trần", align: "right" },
+    { id: "finalPrice", label: "Giá chốt / Thấp nhất", align: "right" },
+    { id: "bidCount", label: "Lượt thầu", align: "center" },
+    { id: "status", label: "Trạng thái", align: "center", sortable: false },
+    { id: "actions", label: "Thao tác", align: "center", sortable: false },
+  ]);
+
+  const handleDragStart = (e, index) => {
+    e.dataTransfer.setData("colIndex", index.toString());
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (e, index) => {
+    const dragIndex = Number(e.dataTransfer.getData("colIndex"));
+    if (isNaN(dragIndex) || dragIndex === index) return;
+    const updated = [...columnsList];
+    const [removed] = updated.splice(dragIndex, 1);
+    updated.splice(index, 0, removed);
+    setColumnsList(updated);
+  };
+
+  const handleRequestSort = (property) => {
+    const isAsc = orderBy === property && order === "asc";
+    setOrder(isAsc ? "desc" : "asc");
+    setOrderBy(property);
+  };
+
+  // Reset page when filters change
+  useEffect(() => {
+    setPage(1);
+  }, [searchTerm, statusTab, originFilter, destFilter, order, orderBy]);
+
+  // Formatter helpers
+  const formatCurrency = (val) => {
+    return new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND" })
+      .format(val)
+      .replace("₫", "đ");
+  };
+
+  // Extract provinces lists dynamically
+  const originProvinces = useMemo(() => {
+    return Array.from(new Set(shipments.map((s) => s.from.province))).sort();
+  }, [shipments]);
+
+  const destProvinces = useMemo(() => {
+    return Array.from(new Set(shipments.map((s) => s.to.province))).sort();
+  }, [shipments]);
+
+  // Compute live KPI analytics
+  const kpis = useMemo(() => {
+    const total = shipments.length;
+    const active = shipments.filter((s) => s.status === "active_bids").length;
+    const completed = shipments.filter((s) => s.status === "completed").length;
+    
+    // Total savings computed
+    const totalSavings = shipments.reduce((sum, s) => {
+      if (s.status === "cancelled") return sum;
+      const finalPrice = s.finalPrice || s.currentLowestBid || 0;
+      if (finalPrice > 0) {
+        return sum + (s.maxPrice - finalPrice);
+      }
+      return sum;
+    }, 0);
+
+    return { total, active, completed, totalSavings };
+  }, [shipments]);
+
+  // Status options helper
+  const getStatusDetails = (status) => {
+    switch (status) {
+      case "pending_bids":
+        return { label: "Chờ đấu giá", color: "warning" };
+      case "active_bids":
+        return { label: "Đang đấu giá", color: "primary" };
+      case "awarded":
+        return { label: "Đã chốt thầu", color: "info" };
+      case "shipping":
+        return { label: "Đang vận chuyển", color: "secondary" };
+      case "completed":
+        return { label: "Đã hoàn thành", color: "success" };
+      case "cancelled":
+        return { label: "Đã hủy", color: "error" };
+      default:
+        return { label: "Không rõ", color: "default" };
+    }
+  };
+
+  // Filter & Sort Logic
+  const filteredAndSortedShipments = useMemo(() => {
+    let result = [...shipments];
+
+    // 1. Text Search Filter (Id, goods type, province name, detail)
+    if (searchTerm.trim() !== "") {
+      const q = searchTerm.toLowerCase();
+      result = result.filter(
+        (s) =>
+          s.id.toLowerCase().includes(q) ||
+          s.goodsType.toLowerCase().includes(q) ||
+          s.from.province.toLowerCase().includes(q) ||
+          s.to.province.toLowerCase().includes(q) ||
+          s.from.detail.toLowerCase().includes(q) ||
+          s.to.detail.toLowerCase().includes(q)
+      );
+    }
+
+    // 2. Status Tab Filter
+    if (statusTab !== "all") {
+      result = result.filter((s) => s.status === statusTab);
+    }
+
+    // 3. Origin Province Filter
+    if (originFilter !== "all") {
+      result = result.filter((s) => s.from.province === originFilter);
+    }
+
+    // 4. Destination Province Filter
+    if (destFilter !== "all") {
+      result = result.filter((s) => s.to.province === destFilter);
+    }
+
+    // 5. Sorting Options
+    result.sort((a, b) => {
+      let comparison = 0;
+      if (orderBy === "dateCreated") {
+        comparison = new Date(a.dateCreated) - new Date(b.dateCreated);
+      } else if (orderBy === "id") {
+        comparison = a.id.localeCompare(b.id);
+      } else if (orderBy === "maxPrice" || orderBy === "finalPrice" || orderBy === "bidCount") {
+        const valA = a[orderBy] || 0;
+        const valB = b[orderBy] || 0;
+        comparison = valA - valB;
+      } else if (orderBy === "goodsType") {
+        comparison = a.goodsType.localeCompare(b.goodsType);
+      } else if (orderBy === "route") {
+        comparison = a.from.province.localeCompare(b.from.province);
+      }
+      return order === "desc" ? -comparison : comparison;
+    });
+
+    return result;
+  }, [shipments, searchTerm, statusTab, originFilter, destFilter, order, orderBy]);
+
+  // Paginated Slicing
+  const paginatedShipments = useMemo(() => {
+    const startIndex = (page - 1) * rowsPerPage;
+    return filteredAndSortedShipments.slice(startIndex, startIndex + rowsPerPage);
+  }, [filteredAndSortedShipments, page, rowsPerPage]);
+
+  const totalPages = Math.ceil(filteredAndSortedShipments.length / rowsPerPage);
+
+  const handleResetFilters = () => {
+    setSearchTerm("");
+    setStatusTab("all");
+    setOriginFilter("all");
+    setDestFilter("all");
+    setOrder("desc");
+    setOrderBy("dateCreated");
+  };
+
+  return (
+    <Box className="w-full min-h-screen pb-12 animate-fade-in-up">
+      {/* Page Header */}
+      <PageHeader
+        title="Lịch Sử Phiên Đấu Giá Ngược"
+        subtitle="Theo dõi, lọc và quản lý toàn bộ các lô hàng đã hoặc đang tiến hành đấu giá ngược."
+        breadcrumbs={[
+          { label: "Trang chủ", path: "/shipper/dashboard" },
+          { label: "Lịch sử đấu giá" },
+        ]}
+      />
+
+      {loadError && <Alert severity="error" className="!mb-4">{loadError}</Alert>}
+      {loading && (
+        <div className="mb-6 flex items-center gap-3 rounded-xl bg-white p-5 text-ink-muted shadow-sm" role="status">
+          <CircularProgress size={22} />
+          Đang tải lịch sử đấu giá...
+        </div>
+      )}
+
+      {/* KPI Cards Overview */}
+      <Grid container spacing={3} className="!mb-6">
+        <Grid item xs={12} sm={6} md={3}>
+          <Card className="!rounded-xl border border-line/80 bg-white/80 shadow-[0_4px_20px_rgba(27,73,101,0.02)] backdrop-blur-md">
+            <CardContent className="!p-5 flex items-center justify-between">
+              <div>
+                <Typography variant="caption" className="text-ink-subtle font-bold block uppercase tracking-wider">
+                  Tổng phiên đấu giá
+                </Typography>
+                <Typography variant="h4" className="!font-extrabold text-ink !mt-1">
+                  {kpis.total}
+                </Typography>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-brand-soft flex items-center justify-center text-[var(--color-brand)] border border-brand-soft/50">
+                <GavelIcon />
+              </div>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        <Grid item xs={12} sm={6} md={3}>
+          <Card className="!rounded-xl border border-line/80 bg-white/80 shadow-[0_4px_20px_rgba(27,73,101,0.02)] backdrop-blur-md">
+            <CardContent className="!p-5 flex items-center justify-between">
+              <div>
+                <Typography variant="caption" className="text-ink-subtle font-bold block uppercase tracking-wider">
+                  Đang hoạt động
+                </Typography>
+                <Typography variant="h4" className="!font-extrabold text-warning !mt-1">
+                  {kpis.active}
+                </Typography>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-warning-soft flex items-center justify-center text-warning border border-warning-soft/50">
+                <AccessTimeIcon />
+              </div>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        <Grid item xs={12} sm={6} md={3}>
+          <Card className="!rounded-xl border border-line/80 bg-white/80 shadow-[0_4px_20px_rgba(27,73,101,0.02)] backdrop-blur-md">
+            <CardContent className="!p-5 flex items-center justify-between">
+              <div>
+                <Typography variant="caption" className="text-ink-subtle font-bold block uppercase tracking-wider">
+                  Giao thành công
+                </Typography>
+                <Typography variant="h4" className="!font-extrabold text-success !mt-1">
+                  {kpis.completed}
+                </Typography>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-success-soft flex items-center justify-center text-success border border-success-soft/50">
+                <CheckCircleIcon />
+              </div>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        <Grid item xs={12} sm={6} md={3}>
+          <Card className="!rounded-xl border border-success-soft/30 bg-success/5 shadow-[0_4px_20px_rgba(16,185,129,0.04)]">
+            <CardContent className="!p-5 flex items-center justify-between">
+              <div>
+                <Typography variant="caption" className="text-success font-bold block uppercase tracking-wider">
+                  Tiết kiệm tích lũy
+                </Typography>
+                <Typography variant="h4" className="!font-black text-success !mt-1">
+                  {formatCurrency(kpis.totalSavings)}
+                </Typography>
+              </div>
+              <div className="w-12 h-12 rounded-xl bg-success/10 flex items-center justify-center text-success border border-success/20">
+                <MonetizationOnIcon />
+              </div>
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+
+      {/* Main Container Card containing Filters and Table */}
+      <Card 
+        className="!rounded-xl border border-line !shadow-[0_8px_32px_0_rgba(27,73,101,0.02)] overflow-hidden"
+        sx={{
+          background: "rgba(255, 255, 255, 0.8)",
+          backdropFilter: "blur(20px)",
+        }}
+      >
+        {/* Status Tabs */}
+        <Box className="border-b border-line bg-surface-sunken/50 px-6">
+          <Tabs
+            value={statusTab}
+            onChange={(e, val) => setStatusTab(val)}
+            variant="scrollable"
+            scrollButtons="auto"
+            sx={{
+              "& .MuiTab-root": {
+                textTransform: "none",
+                fontWeight: "bold",
+                fontSize: "0.85rem",
+                color: "var(--color-ink-muted)",
+                py: 2,
+                minWidth: "auto",
+                mr: 3,
+              },
+              "& .Mui-selected": {
+                color: "var(--color-brand) !important",
+              },
+              "& .MuiTabs-indicator": {
+                backgroundColor: "var(--color-brand)",
+                height: "3px",
+                borderRadius: "3px",
+              },
+            }}
+          >
+            <Tab label="Tất cả phiên" value="all" />
+            <Tab label="Chờ đấu giá" value="pending_bids" />
+            <Tab label="Đang đấu giá" value="active_bids" />
+            <Tab label="Đã chốt thầu" value="awarded" />
+            <Tab label="Đang vận chuyển" value="shipping" />
+            <Tab label="Đã hoàn thành" value="completed" />
+            <Tab label="Đã hủy" value="cancelled" />
+          </Tabs>
+        </Box>
+
+        {/* Filter Toolbar */}
+        <Box className="p-6 border-b border-line space-y-4">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            {/* Search Box */}
+            <TextField
+              placeholder="Tìm kiếm mã, mặt hàng, địa điểm..."
+              size="small"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full md:w-80"
+              InputProps={{
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon className="text-ink-subtle" fontSize="small" />
+                  </InputAdornment>
+                ),
+                endAdornment: searchTerm && (
+                  <InputAdornment position="end">
+                    <IconButton size="small" onClick={() => setSearchTerm("")}>
+                      <ClearIcon fontSize="small" />
+                    </IconButton>
+                  </InputAdornment>
+                ),
+                className: "!rounded-xl bg-surface-sunken/50 hover:bg-surface-sunken focus-within:bg-white transition-all",
+              }}
+              sx={{
+                "& .MuiOutlinedInput-notchedOutline": {
+                  borderColor: "rgba(27,73,101,0.08)",
+                },
+                "& :hover .MuiOutlinedInput-notchedOutline": {
+                  borderColor: "rgba(27,73,101,0.15)",
+                },
+                "& .Mui-focused .MuiOutlinedInput-notchedOutline": {
+                  borderColor: "var(--color-brand)",
+                },
+              }}
+            />
+
+            {/* Filter Group */}
+            <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+              {/* Origin Filter */}
+              <FormControl size="small" className="min-w-[130px] flex-1 md:flex-initial">
+                <InputLabel id="origin-select-label" className="!font-semibold !text-ink-muted !text-sm">Điểm xuất phát</InputLabel>
+                <Select
+                  labelId="origin-select-label"
+                  value={originFilter}
+                  label="Điểm xuất phát"
+                  onChange={(e) => setOriginFilter(e.target.value)}
+                  className="!rounded-xl"
+                  sx={{
+                    "& .MuiOutlinedInput-notchedOutline": {
+                      borderColor: "rgba(27,73,101,0.08)",
+                    },
+                    "& .MuiSelect-select": {
+                      fontSize: "0.85rem",
+                      fontWeight: 600,
+                      color: "var(--color-ink-muted)",
+                    }
+                  }}
+                >
+                  <MenuItem value="all">Tất cả tỉnh</MenuItem>
+                  {originProvinces.map((prov) => (
+                    <MenuItem key={prov} value={prov}>
+                      {prov}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              {/* Destination Filter */}
+              <FormControl size="small" className="min-w-[130px] flex-1 md:flex-initial">
+                <InputLabel id="dest-select-label" className="!font-semibold !text-ink-muted !text-sm">Điểm giao hàng</InputLabel>
+                <Select
+                  labelId="dest-select-label"
+                  value={destFilter}
+                  label="Điểm giao hàng"
+                  onChange={(e) => setDestFilter(e.target.value)}
+                  className="!rounded-xl"
+                  sx={{
+                    "& .MuiOutlinedInput-notchedOutline": {
+                      borderColor: "rgba(27,73,101,0.08)",
+                    },
+                    "& .MuiSelect-select": {
+                      fontSize: "0.85rem",
+                      fontWeight: 600,
+                      color: "var(--color-ink-muted)",
+                    }
+                  }}
+                >
+                  <MenuItem value="all">Tất cả tỉnh</MenuItem>
+                  {destProvinces.map((prov) => (
+                    <MenuItem key={prov} value={prov}>
+                      {prov}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              {/* Reset Button */}
+              {(searchTerm || originFilter !== "all" || destFilter !== "all" || statusTab !== "all" || orderBy !== "dateCreated" || order !== "desc") && (
+                <Button
+                  variant="text"
+                  color="inherit"
+                  size="small"
+                  onClick={handleResetFilters}
+                  startIcon={<FilterListIcon />}
+                  className="!text-ink-muted !font-bold !capitalize"
+                >
+                  Xóa lọc
+                </Button>
+              )}
+            </div>
+          </div>
+        </Box>
+
+        {/* Data Table */}
+        <TableContainer component={Paper} className="!shadow-none !bg-transparent">
+          <Table sx={{ minWidth: 800 }}>
+            <TableHead className="bg-surface-sunken/50">
+              <TableRow>
+                {columnsList.map((col, idx) => (
+                  <TableCell
+                    key={col.id}
+                    align={col.align}
+                    draggable
+                    onDragStart={(e) => handleDragStart(e, idx)}
+                    onDragOver={handleDragOver}
+                    onDrop={(e) => handleDrop(e, idx)}
+                    className="!font-bold !text-ink-subtle !text-xs uppercase !border-line select-none hover:bg-surface-sunken/80 transition-colors cursor-move"
+                  >
+                    {col.sortable !== false ? (
+                      <TableSortLabel
+                        active={orderBy === col.id}
+                        direction={orderBy === col.id ? order : "asc"}
+                        onClick={() => handleRequestSort(col.id)}
+                        className="!font-bold hover:!text-ink"
+                        sx={{ '& .MuiTableSortLabel-icon': { color: 'var(--color-ink-muted) !important' } }}
+                      >
+                        {col.label}
+                      </TableSortLabel>
+                    ) : (
+                      <span>{col.label}</span>
+                    )}
+                  </TableCell>
+                ))}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {loading ? (
+                <TableRow>
+                  <TableCell colSpan={columnsList.length} align="center" className="!py-16 !border-line">
+                    <CircularProgress size={40} sx={{ color: "var(--color-brand)" }} />
+                  </TableCell>
+                </TableRow>
+              ) : 
+              paginatedShipments.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={columnsList.length} align="center" className="!py-16 !border-line">
+                    <Typography variant="body2" className="text-ink-subtle font-medium">
+                      Không tìm thấy phiên đấu giá nào phù hợp với bộ lọc hiện tại.
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              ) : (
+                paginatedShipments.map((shipment) => {
+                  const statusInfo = getStatusDetails(shipment.status);
+                  const finalPriceToShow = shipment.finalPrice || shipment.currentLowestBid || 0;
+                  
+                  return (
+                    <TableRow key={shipment.id} className="hover:bg-surface-sunken/30 transition-colors">
+                      {columnsList.map((col) => {
+                        if (col.id === "id") {
+                          return (
+                            <TableCell key={col.id} className="!font-mono !font-bold !text-[var(--color-brand)] !border-line">
+                              <Link href={`/shipper/bidding/history?id=${shipment.id}`} className="hover:underline">
+                                {shipment.id}
+                              </Link>
+                            </TableCell>
+                          );
+                        }
+                        if (col.id === "goodsType") {
+                          return (
+                            <TableCell key={col.id} className="!border-line">
+                              <div className="flex flex-col">
+                                <span className="font-bold text-ink text-xs sm:text-sm">
+                                  {shipment.title || shipment.goodsName || shipment.goodsType}
+                                </span>
+                                {(shipment.title || shipment.goodsName) && (
+                                  <span className="text-[0.68rem] text-info font-semibold mt-0.5">
+                                    Loại: {shipment.goodsType}
+                                  </span>
+                                )}
+                                <span className="text-[0.7rem] text-ink-subtle font-bold mt-0.5">
+                                  {shipment.weight} • {shipment.volume}
+                                </span>
+                              </div>
+                            </TableCell>
+                          );
+                        }
+                        if (col.id === "route") {
+                          return (
+                            <TableCell key={col.id} className="!border-line">
+                              <div className="flex flex-col">
+                                <span className="font-bold text-ink text-xs">
+                                  {shipment.from.province} → {shipment.to.province}
+                                </span>
+                                <Tooltip title={`Từ: ${shipment.from.detail} | Đến: ${shipment.to.detail}`} arrow>
+                                  <span className="text-[0.68rem] text-ink-subtle truncate max-w-[180px] font-medium block mt-0.5 cursor-help">
+                                    {shipment.from.detail}
+                                  </span>
+                                </Tooltip>
+                              </div>
+                            </TableCell>
+                          );
+                        }
+                        if (col.id === "maxPrice") {
+                          return (
+                            <TableCell key={col.id} align="right" className="!font-mono !text-ink-muted !text-xs !border-line">
+                              {formatCurrency(shipment.maxPrice)}
+                            </TableCell>
+                          );
+                        }
+                        if (col.id === "finalPrice") {
+                          return (
+                            <TableCell 
+                              key={col.id}
+                              align="right" 
+                              className={`!font-mono !font-bold !border-line ${
+                                shipment.status === "completed" || shipment.status === "shipping" || shipment.status === "awarded"
+                                  ? "!text-success"
+                                  : "!text-ink"
+                              }`}
+                            >
+                              {finalPriceToShow > 0 ? formatCurrency(finalPriceToShow) : "Chưa có"}
+                            </TableCell>
+                          );
+                        }
+                        if (col.id === "bidCount") {
+                          return (
+                            <TableCell key={col.id} align="center" className="!border-line">
+                              <Chip
+                                label={`${shipment.bidCount} thầu`}
+                                size="small"
+                                className={`!font-bold !text-[0.7rem] ${
+                                  shipment.bidCount > 0
+                                    ? "bg-brand-soft text-brand border border-brand-soft"
+                                    : "bg-surface-sunken text-ink-subtle"
+                                }`}
+                              />
+                            </TableCell>
+                          );
+                        }
+                        if (col.id === "status") {
+                          return (
+                            <TableCell key={col.id} align="center" className="!border-line">
+                              <Chip
+                                label={statusInfo.label}
+                                size="small"
+                                color={statusInfo.color}
+                                className="!font-extrabold !text-[0.68rem] rounded-md px-1.5"
+                              />
+                            </TableCell>
+                          );
+                        }
+                        if (col.id === "actions") {
+                          return (
+                            <TableCell key={col.id} align="center" className="!border-line">
+                              <div className="flex justify-center items-center gap-1.5">
+                                <Tooltip title="Xem thầu & Chi tiết">
+                                  <IconButton
+                                    component={Link}
+                                    href={`/shipper/bidding/history?id=${shipment.id}`}
+                                    size="small"
+                                    className="text-[var(--color-brand)] hover:bg-[var(--color-brand)]/5 bg-surface-sunken"
+                                  >
+                                    <VisibilityIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+
+                                {shipment.status === "shipping" && (
+                                  <Tooltip title="Định vị hành trình">
+                                    <Link href={getTrackingHref(shipment)} passHref>
+                                      <IconButton
+                                        size="small"
+                                        className="text-info hover:bg-info-soft bg-surface-sunken"
+                                      >
+                                        <LocalShippingIcon fontSize="small" />
+                                      </IconButton>
+                                    </Link>
+                                  </Tooltip>
+                                )}
+
+                                {(shipment.status === "awarded" || shipment.status === "shipping" || shipment.status === "completed") && (
+                                  <Tooltip title="Xem hợp đồng">
+                                    <Link href={`/shipper/contracts?id=${shipment.id}`} passHref>
+                                      <IconButton
+                                        size="small"
+                                        className="text-brand hover:bg-brand-soft bg-surface-sunken"
+                                      >
+                                        <DescriptionIcon fontSize="small" />
+                                      </IconButton>
+                                    </Link>
+                                  </Tooltip>
+                                )}
+                              </div>
+                            </TableCell>
+                          );
+                        }
+                        return null;
+                      })}
+                    </TableRow>
+                  );
+                })
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+
+        {/* Pagination Footer */}
+        {totalPages > 1 && (
+          <Box className="px-6 py-4.5 border-t border-line flex flex-col sm:flex-row items-center justify-between gap-4 bg-surface-sunken/20">
+            <div className="flex items-center gap-2">
+              <Typography variant="caption" className="text-ink-subtle font-medium">
+                Hiển thị
+              </Typography>
+              <Select
+                value={rowsPerPage}
+                onChange={(e) => {
+                  setRowsPerPage(Number(e.target.value));
+                  setPage(1);
+                }}
+                size="small"
+                variant="outlined"
+                sx={{
+                  height: 28,
+                  fontSize: "0.75rem",
+                  fontWeight: 600,
+                  color: "var(--color-ink-muted)",
+                  "& .MuiOutlinedInput-notchedOutline": {
+                    borderColor: "rgba(27,73,101,0.08)",
+                  },
+                  "& .MuiSelect-select": {
+                    py: 0.5,
+                    px: 1,
+                  }
+                }}
+              >
+                <MenuItem value={5}>5 phiên</MenuItem>
+                <MenuItem value={10}>10 phiên</MenuItem>
+                <MenuItem value={20}>20 phiên</MenuItem>
+              </Select>
+              <Typography variant="caption" className="text-ink-subtle font-medium">
+                mỗi trang / Tổng số {filteredAndSortedShipments.length} phiên
+              </Typography>
+            </div>
+
+            <Pagination
+              count={totalPages}
+              page={page}
+              onChange={(e, val) => setPage(val)}
+              variant="outlined"
+              shape="rounded"
+              size="small"
+              sx={{
+                "& .MuiPaginationItem-root": {
+                  color: "var(--color-ink-muted)",
+                  fontWeight: 600,
+                  fontSize: "0.75rem",
+                  borderColor: "rgba(27,73,101,0.08)",
+                  borderRadius: "8px",
+                  "&:hover": {
+                    backgroundColor: "rgba(27,73,101,0.04)",
+                  },
+                },
+                "& .Mui-selected": {
+                  backgroundColor: "var(--color-brand) !important",
+                  color: "var(--color-surface) !important",
+                  borderColor: "var(--color-brand) !important",
+                },
+              }}
+            />
+          </Box>
+        )}
+      </Card>
+    </Box>
+  );
+}

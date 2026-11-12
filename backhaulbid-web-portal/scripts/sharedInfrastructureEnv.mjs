@@ -1,0 +1,141 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const scriptsDirectory = path.dirname(fileURLToPath(import.meta.url));
+const repositoryRoot = path.resolve(scriptsDirectory, "..", "..", "..");
+
+const defaultCandidates = [
+  path.join(scriptsDirectory, "..", "..", "backhaulbid-infrastructure", ".env"),
+  path.join(repositoryRoot, "be", "backhaulbid-infrastructure", ".env"),
+  path.join(scriptsDirectory, "..", ".env"),
+];
+export const SHARED_ENV_FILE = defaultCandidates.find((candidate) => fs.existsSync(candidate)) || defaultCandidates[0];
+
+export const FRONTEND_ENV_KEYS = Object.freeze([
+  "NEXT_PUBLIC_GATEWAY_URL",
+  "NEXT_PUBLIC_BIDDING_SOCKET_PATH",
+]);
+
+/** Removes dotenv quoting and inline comments from one environment value. */
+function normalizeDotEnvValue(rawValue) {
+  const value = rawValue.trim();
+
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return value.slice(1, -1).replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "\t").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  }
+
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1);
+  }
+
+  const inlineCommentIndex = value.search(/\s+#/);
+  return inlineCommentIndex >= 0
+    ? value.slice(0, inlineCommentIndex).trimEnd()
+    : value;
+}
+
+/** Parses dotenv assignments while ignoring blank lines and comments. */
+export function parseDotEnv(text) {
+  const values = {};
+
+  for (const line of String(text).split(/\r?\n/)) {
+    const trimmedLine = line.trim();
+
+    if (!trimmedLine || trimmedLine.startsWith("#")) {
+      continue;
+    }
+
+    const assignment = trimmedLine.startsWith("export ")
+      ? trimmedLine.slice("export ".length)
+      : trimmedLine;
+    const separatorIndex = assignment.indexOf("=");
+
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = assignment.slice(0, separatorIndex).trim();
+
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      continue;
+    }
+
+    values[key] = normalizeDotEnvValue(assignment.slice(separatorIndex + 1));
+  }
+
+  return values;
+}
+
+/** Selects only the public variables consumed by the web portal. */
+export function selectFrontendEnvironment(values = {}) {
+  return FRONTEND_ENV_KEYS.reduce((selected, key) => {
+    if (Object.prototype.hasOwnProperty.call(values, key)) {
+      selected[key] = String(values[key] ?? "");
+    }
+
+    return selected;
+  }, {});
+}
+
+/** Merges the shared frontend configuration over the process environment. */
+export function mergeFrontendEnvironment(baseEnvironment = {}, sharedEnvironment = {}) {
+  const merged = { ...baseEnvironment };
+  const selectedSharedEnvironment = selectFrontendEnvironment(sharedEnvironment);
+
+  for (const [key, value] of Object.entries(selectedSharedEnvironment)) {
+    merged[key] = value;
+  }
+
+  return merged;
+}
+
+/** Includes blank shared values so local process values cannot override the shared file. */
+function getAuthoritativeSharedEnvironment(parsedEnvironment) {
+  return FRONTEND_ENV_KEYS.reduce((selected, key) => {
+    selected[key] = parsedEnvironment[key] ?? "";
+    return selected;
+  }, {});
+}
+
+/** Loads gateway and socket settings from the shared infrastructure dotenv file. */
+export function loadFrontendEnvironment({
+  filePath = SHARED_ENV_FILE,
+  existingEnvironment = process.env,
+} = {}) {
+  if (fs.existsSync(filePath)) {
+    const parsedEnvironment = parseDotEnv(fs.readFileSync(filePath, "utf8"));
+    const sharedEnvironment = getAuthoritativeSharedEnvironment(
+      selectFrontendEnvironment(parsedEnvironment),
+    );
+
+    return {
+      source: "infrastructure",
+      environment: mergeFrontendEnvironment(
+        existingEnvironment,
+        sharedEnvironment,
+      ),
+    };
+  }
+
+  const existingFrontendEnvironment = selectFrontendEnvironment(
+    existingEnvironment,
+  );
+
+  if (Object.keys(existingFrontendEnvironment).length === 0) {
+    if (process.env.CI) {
+      console.warn(
+        "[shared-env] CẢNH BÁO: Không tìm thấy cấu hình dùng chung và biến môi trường (Bỏ qua do đang chạy trên CI).",
+      );
+    } else {
+      throw new Error(
+        "Không tìm thấy cấu hình dùng chung tại be/backhaulbid-infrastructure/.env và cũng không có biến frontend trong môi trường hiện tại.",
+      );
+    }
+  }
+
+  return {
+    source: "process",
+    environment: { ...existingEnvironment },
+  };
+}

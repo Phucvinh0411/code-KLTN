@@ -1,0 +1,114 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { io, Socket } from 'socket.io-client';
+import { BIDDING_SOCKET_PATH, GATEWAY_URL } from '@/config/clientConfig';
+
+interface UseSocketOptions {
+  companyId?: string;
+  userId?: string;
+}
+
+interface PendingListener {
+  eventName: string;
+  callback: (...args: any[]) => void;
+}
+
+export const useSocket = (options: UseSocketOptions = {}) => {
+  const socketRef = useRef<Socket | null>(null);
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const pendingListenersRef = useRef<PendingListener[]>([]);
+
+  const attachListener = useCallback((eventName: string, callback: PendingListener['callback']) => {
+    socketRef.current?.on(eventName, callback);
+  }, []);
+
+  useEffect(() => {
+    // Connect through the api-gateway so JWT cookies are exchanged for
+    // authenticated headers before the request reaches bidding-service.
+    const instance = io(GATEWAY_URL, {
+      transports: ['polling', 'websocket'],
+      path: BIDDING_SOCKET_PATH,
+      withCredentials: true,
+      autoConnect: true,
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000,
+    });
+
+    socketRef.current = instance;
+    setSocket(instance);
+
+    for (const { eventName, callback } of pendingListenersRef.current) {
+      attachListener(eventName, callback);
+    }
+    pendingListenersRef.current = [];
+
+    instance.on('connect', () => {
+      console.log('Socket connected:', instance.id);
+
+      // Register the device so the gateway can join this client into the
+      // company room used by fleet matching notifications.
+      if (options.companyId) {
+        instance.emit('register_device', {
+          companyId: options.companyId,
+          userId: options.userId,
+        });
+        console.log(`Registered device for company: ${options.companyId}`);
+      }
+    });
+
+    instance.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
+    });
+
+    instance.on('connect_error', async (err) => {
+      console.warn('Socket connection error:', err.message);
+      if (err?.message?.includes('401') || err?.message?.includes('Authentication') || err?.message?.includes('unauthorized')) {
+        instance.disconnect();
+        try {
+          const res = await fetch('/api/auth/refresh', { method: 'POST' });
+          if (res.ok) {
+            instance.connect();
+          }
+        } catch {
+          // ignore
+        }
+      }
+    });
+
+    const handlePageHide = () => {
+      instance.disconnect();
+    };
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) {
+        instance.connect();
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('pageshow', handlePageShow);
+
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('pageshow', handlePageShow);
+      instance.disconnect();
+      socketRef.current = null;
+      setSocket(null);
+    };
+  }, [options.companyId, options.userId, attachListener]);
+
+  const listen = useCallback((eventName: string, callback: PendingListener['callback']) => {
+    if (socketRef.current) {
+      attachListener(eventName, callback);
+    } else {
+      pendingListenersRef.current.push({ eventName, callback });
+    }
+
+    return () => {
+      pendingListenersRef.current = pendingListenersRef.current.filter(
+        (listener) => listener.eventName !== eventName || listener.callback !== callback,
+      );
+      socketRef.current?.off(eventName, callback);
+    };
+  }, [attachListener]);
+
+  return { listen, socket };
+};

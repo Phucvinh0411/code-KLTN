@@ -1,0 +1,95 @@
+server:
+  port: ${SERVER_PORT:8081}
+
+spring:
+  application:
+    name: identity-service
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 16MB
+      file-size-threshold: 16MB
+
+  # ──────────────────────────────────────────
+  # Docker and CI must supply these values; keeping them required prevents accidental database drift.
+  # ──────────────────────────────────────────
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      idle-timeout: 30000
+      connection-timeout: 20000
+
+  # ──────────────────────────────────────────
+  # JPA Configuration
+  # ──────────────────────────────────────────
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  # ──────────────────────────────────────────
+  # Flyway Configuration
+  # ──────────────────────────────────────────
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    baseline-version: 0
+    validate-on-migrate: false
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+  instance:
+    prefer-ip-address: true
+
+app:
+  ekyc:
+    nfc-enabled: ${NFC_EKYC_ENABLED:false}
+    evidence-key: ${EKYC_EVIDENCE_ENCRYPTION_KEY:}
+    auto-accept: ${EKYC_AUTO_ACCEPT:DISABLED}
+    # Literal on purpose (no env var): only the local profile file turns this on.
+    development-pass-accepted: false
+  jwt:
+    secret: ${JWT_SECRET}
+  # Driver code sign-in (V3.1): contract owns assignments; the replay key never leaves the backend.
+  contract:
+    url: ${CONTRACT_SERVICE_URL:http://contract-service:8080}
+  # Cargo-liability certificates are private: identity reads them from media-service over the internal token only.
+  media:
+    url: ${MEDIA_SERVICE_URL:http://media-service:8080}
+  internal-token: ${INTERNAL_SERVICE_TOKEN:}
+  # Company lookup by tax code (xinvoice.vn). Both values are sent as headers and are never logged.
+  business-lookup:
+    client-id: ${BUSINESS_LOOKUP_CLIENT_ID:}
+    api-key: ${BUSINESS_LOOKUP_API_KEY:}
+  driver:
+    replay-key: ${DRIVER_REPLAY_KEY:}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+springdoc:
+  api-docs:
+    enabled: ${SWAGGER_ENABLED:false}
+  swagger-ui:
+    enabled: ${SWAGGER_ENABLED:false}
+    path: /swagger-ui.html
+    disable-swagger-default-url: true

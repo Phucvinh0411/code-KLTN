@@ -1,0 +1,38 @@
+# ================================
+# Infrastructure .gitignore
+# ================================
+
+# Environment variables
+.env
+.env.local
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes data (local persistence)
+data/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+
+# --- AI & Agent Artifacts ---
+.agents/
+.claude/
+.gitnexus/
+.impeccable/
+artifacts/
+AGENTS.md
+CLAUDE.md
+GEMINI*.md
+*REPORT*.md

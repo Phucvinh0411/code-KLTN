@@ -1,0 +1,726 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import Alert from "@mui/material/Alert";
+import Box from "@mui/material/Box";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogTitle from "@mui/material/DialogTitle";
+import TextField from "@mui/material/TextField";
+import Typography from "@mui/material/Typography";
+import BlockIcon from "@mui/icons-material/Block";
+import FlagOutlinedIcon from "@mui/icons-material/FlagOutlined";
+import GavelIcon from "@mui/icons-material/Gavel";
+import GroupsOutlinedIcon from "@mui/icons-material/GroupsOutlined";
+import InsightsOutlinedIcon from "@mui/icons-material/InsightsOutlined";
+import LockOutlinedIcon from "@mui/icons-material/LockOutlined";
+import RemoveRedEyeOutlinedIcon from "@mui/icons-material/RemoveRedEyeOutlined";
+import WifiOutlinedIcon from "@mui/icons-material/WifiOutlined";
+import WifiOffOutlinedIcon from "@mui/icons-material/WifiOffOutlined";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import {
+  AdminMetricCard,
+  AdminPrimaryButton,
+  AdminSearchField,
+  AdminSecondaryButton,
+  AdminSectionCard,
+  AdminSelectField,
+  AdminToolbar,
+} from "@/components/admin/AdminUI";
+import { tokens } from "@/theme/theme";
+import { useGlobalNotification } from "@/components/common/NotificationPopup";
+
+const formatCurrency = (amount) =>
+  amount == null || Number.isNaN(Number(amount))
+    ? "Chưa có"
+    : new Intl.NumberFormat("vi-VN", {
+        style: "currency",
+        currency: "VND",
+        maximumFractionDigits: 0,
+      }).format(Number(amount));
+
+const formatCountdown = (msRemaining) => {
+  if (!Number.isFinite(msRemaining) || msRemaining <= 0) return "00:00:00";
+  const totalSeconds = Math.floor(msRemaining / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds].map((value) => String(value).padStart(2, "0")).join(":");
+};
+
+const formatDateTime = (value) => {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("vi-VN", { dateStyle: "short", timeStyle: "short" }).format(date);
+};
+
+function LiveDot({ urgent = false }) {
+  return (
+    <span className="relative flex h-2.5 w-2.5">
+      <span
+        className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 ${
+          urgent ? "bg-danger" : "bg-success"
+        }`}
+      />
+      <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${urgent ? "bg-danger" : "bg-success"}`} />
+    </span>
+  );
+}
+
+function ConnectionChip({ live }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[0.68rem] font-extrabold uppercase tracking-widest ${
+        live
+          ? "border-success-soft bg-success-soft text-success"
+          : "border-line-strong bg-surface-sunken text-ink-muted"
+      }`}
+    >
+      {live ? <WifiOutlinedIcon className="!text-[0.85rem]" /> : <WifiOffOutlinedIcon className="!text-[0.85rem]" />}
+      {live ? "Realtime" : "Offline"}
+    </span>
+  );
+}
+
+function ChartTooltip({ active, payload, label }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <Box
+      sx={{
+        bgcolor: "background.paper",
+        p: 1.5,
+        border: "1px solid",
+        borderColor: "divider",
+        borderRadius: 2,
+        boxShadow: 2,
+      }}
+    >
+      <Typography variant="caption" sx={{ color: "text.secondary", display: "block" }}>
+        Thời gian: {label}
+      </Typography>
+      <Typography variant="body2" sx={{ color: "var(--color-success)", fontWeight: 700 }}>
+        Giá thầu: {formatCurrency(payload[0].value)}
+      </Typography>
+    </Box>
+  );
+}
+
+function BidFeed({ bids, highlightLatest = false, dark = false }) {
+  const latest = [...bids].slice(-4).reverse();
+
+  if (!latest.length) {
+    return (
+      <div
+        className={`rounded-xl border px-3.5 py-3 text-xs font-medium ${
+          dark ? "border-white/10 bg-white/5 text-ink-subtle" : "border-line bg-surface-sunken text-ink-muted"
+        }`}
+      >
+        Chưa có báo giá nào trong phiên này.
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className={`text-[0.62rem] font-bold uppercase tracking-widest ${dark ? "text-ink-subtle" : "text-ink-muted"}`}>
+        Báo giá mới nhất
+      </div>
+      {latest.map((bid, index) => {
+        const isLatest = index === 0 && highlightLatest;
+        return (
+          <div
+            key={bid.id || `${bid.time}-${index}`}
+            className={`flex items-center gap-2 rounded-xl border px-3 py-1.5 text-xs transition-colors ${
+              dark
+                ? isLatest
+                  ? "border-success/60 bg-success/15 text-success"
+                  : "border-white/10 bg-white/5 text-on-band-soft"
+                : isLatest
+                  ? "border-success-soft bg-success-soft text-success"
+                  : "border-line bg-white text-ink-muted"
+            }`}
+          >
+            <span className={`font-mono text-[0.68rem] ${dark ? "text-ink-subtle" : "text-ink-subtle"}`}>{bid.time}</span>
+            <span className="flex-1 truncate font-medium">
+              {bid.carrierId ? `Nhà xe ${String(bid.carrierId).slice(0, 8)}` : "Nhà xe ẩn danh"}
+            </span>
+            <span className={`font-mono font-extrabold ${dark ? "text-success" : "text-success"}`}>
+              {formatCurrency(bid.bid)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DarkActionButton({ children, tone = "emerald", disabled = false, onClick }) {
+  const toneClasses = {
+    emerald: "border-success/40 text-success hover:bg-success/10",
+    amber: "border-warning/40 text-warning hover:bg-warning/10",
+    rose: "border-danger/60 bg-danger/15 text-danger hover:bg-danger/25",
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-[0.68rem] font-extrabold uppercase tracking-wide transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${toneClasses[tone]}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function LightActionButton({ children, tone = "primary", disabled = false, onClick }) {
+  const toneClasses = {
+    primary: "border-line-strong bg-white text-ink-muted hover:bg-surface-sunken",
+    amber: "border-warning-soft bg-warning-soft text-warning hover:bg-warning-soft",
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-[0.68rem] font-extrabold uppercase tracking-wide transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${toneClasses[tone]}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SessionCard({ session, now, onDetail, onFlag, onStop }) {
+  const bids = session.bidHistory || [];
+  const sealed = session.auctionType === "SEALED";
+  const isOpen = session.status === "OPEN";
+  const isPending = session.status === "PENDING";
+  const endTimeMs = new Date(session.endTime).getTime();
+  const startTimeMs = new Date(session.startTime).getTime();
+  const remainingMs = isOpen ? endTimeMs - now : startTimeMs - now;
+  const urgent = isOpen && remainingMs > 0 && remainingMs <= 60000;
+  const highlightLatest = Boolean(session.lastBidAt && now - session.lastBidAt < 4000);
+
+  if (!isOpen && !isPending) {
+    const isCancelled = session.status === "CANCELLED";
+    return (
+      <div className="relative overflow-hidden rounded-xl border border-line bg-white/70 shadow-sm opacity-80">
+        <div className="flex flex-col gap-3.5 p-5">
+          <div className="flex items-center justify-between gap-3">
+            <span
+              className={`rounded-full border px-2.5 py-0.5 text-[0.68rem] font-extrabold uppercase tracking-widest ${
+                isCancelled
+                  ? "border-danger-soft bg-danger-soft text-danger"
+                  : "border-info-soft bg-info-soft text-info"
+              }`}
+            >
+              {isCancelled ? "Đã hủy" : "Hoàn thành"}
+            </span>
+            <span className="font-mono text-[0.68rem] font-bold text-ink-subtle">{session.id}</span>
+          </div>
+          <div>
+            <Typography variant="subtitle1" className="!font-extrabold !text-ink">
+              {session.title}
+            </Typography>
+            <div className="mt-0.5 text-xs font-medium text-ink-muted">
+              {session.route} · {session.vehicleType}
+            </div>
+          </div>
+          <div className="flex items-center justify-between rounded-xl border border-line bg-surface-sunken px-3.5 py-2.5">
+            <span className="text-[0.62rem] font-bold uppercase tracking-widest text-ink-subtle">
+              {session.winningBidAmount != null ? "Giá trúng thầu" : "Giá thấp nhất"}
+            </span>
+            <span className="font-mono text-base font-black text-ink">
+              {formatCurrency(session.winningBidAmount ?? session.currentBid)}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <LightActionButton onClick={() => onDetail(session.id)}>
+              <RemoveRedEyeOutlinedIcon className="!text-[0.95rem]" /> Chi tiết
+            </LightActionButton>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isPending) {
+    return (
+      <div className="relative overflow-hidden rounded-xl border border-line bg-white/90 shadow-sm">
+        <div className="flex flex-col gap-4 p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <span className="rounded-full border border-warning-soft bg-warning-soft px-2.5 py-0.5 text-[0.68rem] font-extrabold uppercase tracking-widest text-warning">
+                Chờ mở
+              </span>
+              {sealed && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-line-strong bg-surface-sunken px-2.5 py-0.5 text-[0.68rem] font-extrabold uppercase tracking-widest text-ink-muted">
+                  <LockOutlinedIcon className="!text-[0.8rem]" /> Kín
+                </span>
+              )}
+            </div>
+            <div className="text-right">
+              <div className="text-[0.62rem] font-bold uppercase tracking-widest text-ink-subtle">Mở thầu sau</div>
+              <div className="font-mono text-xl font-black tracking-widest text-ink">
+                {formatCountdown(remainingMs)}
+              </div>
+            </div>
+          </div>
+          <div>
+            <div className="font-mono text-[0.68rem] font-bold uppercase tracking-widest text-ink-subtle">{session.id}</div>
+            <Typography variant="subtitle1" className="!font-extrabold !text-ink">
+              {session.title}
+            </Typography>
+            <div className="mt-0.5 text-xs font-medium text-ink-muted">
+              {session.route} · {session.vehicleType}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-xl border border-line bg-surface-sunken px-3.5 py-2.5">
+              <div className="text-[0.62rem] font-bold uppercase tracking-widest text-ink-subtle">Giá khởi điểm</div>
+              <div className="mt-0.5 font-mono text-sm font-black text-ink">{formatCurrency(session.startPrice)}</div>
+            </div>
+            <div className="rounded-xl border border-line bg-surface-sunken px-3.5 py-2.5">
+              <div className="text-[0.62rem] font-bold uppercase tracking-widest text-ink-subtle">Mở thầu lúc</div>
+              <div className="mt-0.5 font-mono text-sm font-black text-ink">{formatDateTime(session.startTime)}</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <LightActionButton onClick={() => onDetail(session.id)}>
+              <RemoveRedEyeOutlinedIcon className="!text-[0.95rem]" /> Chi tiết
+            </LightActionButton>
+            <LightActionButton tone="amber" disabled={session.fraudFlag} onClick={() => onFlag(session.id)}>
+              <FlagOutlinedIcon className="!text-[0.95rem]" /> {session.fraudFlag ? "Đã gắn cờ" : "Gắn cờ"}
+            </LightActionButton>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="relative overflow-hidden rounded-xl border shadow-md transition-all"
+      style={{
+        background: "var(--color-ink)",
+        borderColor: urgent ? "rgba(248,113,113,0.45)" : "rgba(52,211,153,0.25)",
+      }}
+    >
+      <div className="pointer-events-none absolute -right-12 -top-12 h-44 w-44 rounded-full bg-success/20 blur-3xl" />
+      {session.fraudFlag && (
+        <div className="pointer-events-none absolute -bottom-12 -left-12 h-40 w-40 rounded-full bg-danger/15 blur-3xl" />
+      )}
+      <div className="relative z-10 flex flex-col gap-4 p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <LiveDot urgent={urgent} />
+            <span className="rounded-full border border-success/30 bg-success/60 px-2.5 py-0.5 text-[0.68rem] font-extrabold uppercase tracking-widest text-success">
+              {sealed ? (
+                <span className="inline-flex items-center gap-1">
+                  <LockOutlinedIcon className="!text-[0.8rem]" /> Đấu giá kín
+                </span>
+              ) : (
+                "LIVE"
+              )}
+            </span>
+            {session.fraudFlag && (
+              <span className="rounded-full border border-danger/40 bg-danger/60 px-2.5 py-0.5 text-[0.68rem] font-extrabold uppercase tracking-widest text-danger">
+                Cờ rà soát
+              </span>
+            )}
+          </div>
+          <div className="text-right">
+            <div className="text-[0.62rem] font-bold uppercase tracking-widest text-ink-subtle">Đóng thầu sau</div>
+            <div
+              className={`font-mono text-xl font-black tracking-widest ${
+                urgent ? "animate-pulse text-danger" : "text-white"
+              }`}
+            >
+              {formatCountdown(remainingMs)}
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="font-mono text-[0.68rem] font-bold uppercase tracking-widest text-ink-subtle">{session.id}</div>
+          <Typography variant="subtitle1" className="!font-extrabold !text-white">
+            {session.title}
+          </Typography>
+          <div className="mt-0.5 text-xs font-medium text-on-band-soft">
+            {session.route} · {session.vehicleType}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-white/10 bg-white/5 p-3.5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <div className="text-[0.62rem] font-bold uppercase tracking-widest text-success/80">
+                Giá thấp nhất hiện tại
+              </div>
+              <div className="mt-1 font-mono text-2xl font-black tracking-tight text-success">
+                {formatCurrency(session.currentBid)}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-[0.62rem] font-bold uppercase tracking-widest text-ink-subtle">Giá khởi điểm</div>
+              <div className="mt-1 font-mono text-sm font-bold text-on-band-soft">{formatCurrency(session.startPrice)}</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+            <div className="flex items-center gap-1 text-[0.62rem] font-bold uppercase tracking-widest text-ink-subtle">
+              <GroupsOutlinedIcon className="!text-[0.8rem]" /> Nhà xe
+            </div>
+            <div className="mt-0.5 font-mono text-base font-extrabold text-white">{session.activeBidders}</div>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+            <div className="flex items-center gap-1 text-[0.62rem] font-bold uppercase tracking-widest text-ink-subtle">
+              <GavelIcon className="!text-[0.8rem]" /> Lượt thầu
+            </div>
+            <div className="mt-0.5 font-mono text-base font-extrabold text-white">{bids.length}</div>
+          </div>
+        </div>
+
+        <BidFeed bids={bids} highlightLatest={highlightLatest} dark />
+
+        <div className="flex items-center gap-2">
+          <DarkActionButton onClick={() => onDetail(session.id)}>
+            <RemoveRedEyeOutlinedIcon className="!text-[0.95rem]" /> Chi tiết
+          </DarkActionButton>
+          <DarkActionButton tone="amber" disabled={session.fraudFlag} onClick={() => onFlag(session.id)}>
+            <FlagOutlinedIcon className="!text-[0.95rem]" /> {session.fraudFlag ? "Đã gắn cờ" : "Gắn cờ"}
+          </DarkActionButton>
+          <DarkActionButton tone="rose" onClick={() => onStop(session.id)}>
+            <BlockIcon className="!text-[0.95rem]" /> Dừng phiên
+          </DarkActionButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InfoItem({ label, value, emphasize = false }) {
+  return (
+    <Box sx={{ p: 1.5, border: "1px solid var(--color-line)", borderRadius: 2, bgcolor: "var(--color-surface-sunken)" }}>
+      <Typography variant="caption" sx={{ color: "var(--color-ink-muted)", display: "block" }}>
+        {label}
+      </Typography>
+      <Typography variant="body2" sx={{ color: emphasize ? "var(--color-success)" : "var(--color-ink)", fontWeight: 800, mt: 0.35 }}>
+        {value}
+      </Typography>
+    </Box>
+  );
+}
+
+function SessionDetailDialog({ session, open, onClose, onFlag, onStop }) {
+  if (!session) return null;
+  const bids = session.bidHistory || [];
+
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="sm">
+      <DialogTitle sx={{ pb: 1 }}>
+        <Typography variant="h6" sx={{ fontWeight: 800 }}>
+          {session.title}
+        </Typography>
+        <Typography variant="caption" sx={{ color: "var(--color-ink-muted)", fontFamily: "monospace" }}>
+          {session.id} · {session.route}
+        </Typography>
+      </DialogTitle>
+      <DialogContent dividers>
+        {session.fraudFlag && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Phiên đang bị gắn cờ rà soát{session.fraudReason ? `: ${session.fraudReason}` : "."}
+          </Alert>
+        )}
+        <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 1.5, mb: 2.5 }}>
+          <InfoItem label="Trạng thái" value={session.status === "OPEN" ? "Đang mở" : session.status === "PENDING" ? "Chờ mở" : session.status === "CANCELLED" ? "Đã hủy" : "Hoàn thành"} />
+          <InfoItem label="Loại đấu giá" value={session.auctionType === "SEALED" ? "Đấu giá kín" : "Đấu giá công khai"} />
+          <InfoItem label="Giá khởi điểm" value={formatCurrency(session.startPrice)} />
+          <InfoItem label="Giá thấp nhất hiện tại" value={formatCurrency(session.currentBid)} emphasize />
+          <InfoItem label="Số nhà xe tham gia" value={session.activeBidders} />
+          <InfoItem label="Tổng lượt thầu" value={bids.length} />
+          <InfoItem label="Bắt đầu" value={formatDateTime(session.startTime)} />
+          <InfoItem label="Kết thúc" value={formatDateTime(session.endTime)} />
+        </Box>
+
+        <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1 }}>
+          Diễn biến giá thầu
+        </Typography>
+        <Box sx={{ height: 220, border: "1px solid var(--color-line)", borderRadius: 2, bgcolor: "var(--color-surface)", p: 1 }}>
+          {bids.length ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={bids} margin={{ top: 12, right: 16, left: 4, bottom: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={tokens.line} />
+                <XAxis dataKey="time" axisLine={false} tickLine={false} />
+                <YAxis
+                  tickFormatter={(value) => `${Math.round(value / 1000)}k`}
+                  axisLine={false}
+                  tickLine={false}
+                  width={52}
+                />
+                <RechartsTooltip content={<ChartTooltip />} />
+                <Line
+                  type="stepAfter"
+                  dataKey="bid"
+                  stroke={tokens.success}
+                  strokeWidth={3}
+                  dot={{ r: 4, fill: tokens.success, strokeWidth: 2, stroke: tokens.surface }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <Box sx={{ height: "100%", display: "grid", placeItems: "center", color: "var(--color-ink-muted)" }}>
+              <Typography variant="body2">Chưa có báo giá trong phiên này.</Typography>
+            </Box>
+          )}
+        </Box>
+      </DialogContent>
+      <DialogActions sx={{ p: 2, gap: 1 }}>
+        <AdminSecondaryButton onClick={onClose}>Đóng</AdminSecondaryButton>
+        <AdminSecondaryButton
+          startIcon={<FlagOutlinedIcon />}
+          onClick={() => onFlag(session.id)}
+          disabled={session.fraudFlag}
+        >
+          {session.fraudFlag ? "Đã gắn cờ" : "Gắn cờ gian lận"}
+        </AdminSecondaryButton>
+        <AdminPrimaryButton
+          startIcon={<BlockIcon />}
+          onClick={() => onStop(session.id)}
+          disabled={session.status !== "OPEN"}
+          sx={{ bgcolor: "var(--color-danger)", "&:hover": { bgcolor: "var(--color-danger)" } }}
+        >
+          Dừng phiên khẩn cấp
+        </AdminPrimaryButton>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+function EmptyState({ filtered, query }) {
+  return (
+    <Box role="status" sx={{ py: 8, px: 3, textAlign: "center" }}>
+      <InsightsOutlinedIcon sx={{ color: "var(--color-ink-subtle)", fontSize: 42, mb: 1 }} />
+      <Typography variant="h6" sx={{ color: "var(--color-ink)", fontWeight: 800 }}>
+        {filtered ? "Không tìm thấy phiên phù hợp" : "Chưa có phiên đấu giá đang theo dõi"}
+      </Typography>
+      <Typography variant="body2" sx={{ color: "var(--color-ink-muted)", mt: 0.75, maxWidth: 520, mx: "auto" }}>
+        {filtered
+          ? `Không có phiên nào khớp với “${query}”. Hãy thử từ khóa khác.`
+          : "Khi bidding service có phiên OPEN hoặc PENDING, dữ liệu sẽ xuất hiện tại đây."}
+      </Typography>
+    </Box>
+  );
+}
+
+export default function AuctionMonitorView({ sessions, onCancelAuction, onFlagAuction, live = false }) {
+  const notify = useGlobalNotification();
+  const [selectedId, setSelectedId] = useState("");
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [stopDialogOpen, setStopDialogOpen] = useState(false);
+  const [flagDialogOpen, setFlagDialogOpen] = useState(false);
+  const [flagReason, setFlagReason] = useState("");
+  const [actionLoading, setActionLoading] = useState(false);
+  const setActionError = (message) => { if (message) notify.error(message); };
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const selectedSession = sessions.find((session) => session.id === selectedId) || null;
+
+  const filteredSessions = useMemo(() => {
+    const query = searchQuery.trim().toLocaleLowerCase("vi");
+    return sessions.filter((session) => {
+      const matchesStatus = statusFilter === "ALL" || session.status === statusFilter;
+      const matchesQuery =
+        !query ||
+        `${session.id} ${session.title} ${session.route} ${session.vehicleType}`
+          .toLocaleLowerCase("vi")
+          .includes(query);
+      return matchesStatus && matchesQuery;
+    });
+  }, [searchQuery, sessions, statusFilter]);
+
+  const openCount = sessions.filter((session) => session.status === "OPEN").length;
+  const bidCount = sessions.reduce((total, session) => total + (session.bidHistory?.length || 0), 0);
+  const bidderCount = sessions.reduce((total, session) => total + (session.activeBidders || 0), 0);
+  const flaggedCount = sessions.filter((session) => session.fraudFlag).length;
+
+  const openDetail = (sessionId) => {
+    setSelectedId(sessionId);
+    setActionError("");
+    setDetailOpen(true);
+  };
+
+  const requestFlag = (sessionId) => {
+    setSelectedId(sessionId);
+    setActionError("");
+    setDetailOpen(false);
+    setFlagDialogOpen(true);
+  };
+
+  const requestStop = (sessionId) => {
+    setSelectedId(sessionId);
+    setActionError("");
+    setDetailOpen(false);
+    setStopDialogOpen(true);
+  };
+
+  const runAction = async (action, close) => {
+    setActionLoading(true);
+    setActionError("");
+    try {
+      await action();
+      close();
+    } catch (error) {
+      setActionError(error?.response?.data?.message || error?.message || "Không thể thực hiện thao tác.");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const confirmStop = () => {
+    if (!selectedSession) return;
+    runAction(() => onCancelAuction(selectedSession.id), () => setStopDialogOpen(false));
+  };
+
+  const confirmFlag = () => {
+    if (!selectedSession || !flagReason.trim()) return;
+    runAction(
+      () => onFlagAuction(selectedSession.id, flagReason.trim()),
+      () => {
+        setFlagDialogOpen(false);
+        setFlagReason("");
+      },
+    );
+  };
+
+  return (
+    <>
+      <Box className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <AdminMetricCard title="Tổng phiên theo dõi" value={sessions.length} helper="OPEN + PENDING" icon={GavelIcon} />
+        <AdminMetricCard title="Đang mở" value={openCount} helper="Có thể nhận báo giá" icon={InsightsOutlinedIcon} tone="success" />
+        <AdminMetricCard title="Lượt báo giá" value={bidCount} helper={`${bidderCount} nhà xe đang tham gia`} icon={GroupsOutlinedIcon} tone="info" />
+        <AdminMetricCard title="Cần rà soát" value={flaggedCount} helper="Cờ gian lận" icon={FlagOutlinedIcon} tone={flaggedCount ? "danger" : "neutral"} />
+      </Box>
+
+      <AdminSectionCard>
+        <AdminToolbar
+          title="Danh sách phiên đấu giá"
+          subtitle={live ? "Đang nhận báo giá và trạng thái realtime qua WebSocket." : "Chưa kết nối realtime — dữ liệu lấy từ API khi tải trang."}
+        >
+          <ConnectionChip live={live} />
+          <AdminSearchField
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Tìm mã phiên, tuyến, loại xe..."
+          />
+          <AdminSelectField
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            options={[
+              { value: "ALL", label: "Tất cả trạng thái" },
+              { value: "OPEN", label: "Đang mở" },
+              { value: "PENDING", label: "Chờ mở" },
+              { value: "COMPLETED", label: "Hoàn thành" },
+              { value: "CANCELLED", label: "Đã hủy" },
+            ]}
+          />
+        </AdminToolbar>
+
+        {filteredSessions.length === 0 ? (
+          <EmptyState filtered={sessions.length > 0} query={searchQuery.trim()} />
+        ) : (
+          <Box sx={{ p: 2.5 }}>
+            <Box className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+              {filteredSessions.map((session) => (
+                <SessionCard
+                  key={session.id}
+                  session={session}
+                  now={now}
+                  onDetail={openDetail}
+                  onFlag={requestFlag}
+                  onStop={requestStop}
+                />
+              ))}
+            </Box>
+          </Box>
+        )}
+      </AdminSectionCard>
+
+      <SessionDetailDialog
+        session={selectedSession}
+        open={detailOpen && Boolean(selectedSession)}
+        onClose={() => setDetailOpen(false)}
+        onFlag={requestFlag}
+        onStop={requestStop}
+      />
+
+      <Dialog open={stopDialogOpen} onClose={() => !actionLoading && setStopDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>Dừng phiên đấu giá?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Phiên {selectedSession?.id} sẽ chuyển sang trạng thái đã hủy và không nhận thêm đăng ký hoặc báo giá.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <AdminSecondaryButton onClick={() => setStopDialogOpen(false)} disabled={actionLoading}>
+            Hủy
+          </AdminSecondaryButton>
+          <AdminPrimaryButton
+            onClick={confirmStop}
+            disabled={actionLoading}
+            sx={{ bgcolor: "var(--color-danger)", "&:hover": { bgcolor: "var(--color-danger)" } }}
+          >
+            {actionLoading ? "Đang dừng..." : "Xác nhận dừng"}
+          </AdminPrimaryButton>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={flagDialogOpen} onClose={() => !actionLoading && setFlagDialogOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Gắn cờ gian lận</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            Lưu lý do rà soát phiên {selectedSession?.id}.
+          </Typography>
+          <TextField
+            autoFocus
+            fullWidth
+            multiline
+            minRows={3}
+            label="Lý do"
+            value={flagReason}
+            onChange={(event) => setFlagReason(event.target.value)}
+            inputProps={{ maxLength: 500 }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <AdminSecondaryButton onClick={() => setFlagDialogOpen(false)} disabled={actionLoading}>
+            Hủy
+          </AdminSecondaryButton>
+          <AdminPrimaryButton onClick={confirmFlag} disabled={actionLoading || !flagReason.trim()}>
+            {actionLoading ? "Đang lưu..." : "Gắn cờ"}
+          </AdminPrimaryButton>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
+}

@@ -1,0 +1,41 @@
+// 34 tỉnh, thành phố sau sáp nhập theo Nghị quyết 202/2025/QH15, áp dụng từ 01/07/2025.
+// Tên và mã lấy từ provinces.open-api.vn (API v2, /api/v2/p/). Tên hiển thị bỏ tiền tố "Tỉnh" hoặc "Thành phố".
+// Tọa độ tạm: lấy từ đơn vị cùng tên trước sáp nhập (Huế và TP. Hồ Chí Minh lấy theo tên cũ). Chưa tính lại theo ranh giới mới.
+// API ghi Bắc Ninh, Đồng Nai, Quảng Ninh là thành phố trực thuộc Trung ương; theo Nghị quyết 202/2025 đây là tỉnh.
+
+export const VIETNAM_PROVINCES = [
+  { name: "An Giang", code: 91, divisionType: "Tỉnh", lat: 10.3759, lng: 105.4194 },
+  { name: "Bắc Ninh", code: 24, divisionType: "Tỉnh", lat: 21.1861, lng: 106.0763 },
+  { name: "Cà Mau", code: 96, divisionType: "Tỉnh", lat: 9.1769, lng: 105.15 },
+  { name: "Cao Bằng", code: 4, divisionType: "Tỉnh", lat: 22.6667, lng: 106.25 },
+  { name: "Cần Thơ", code: 92, divisionType: "Thành phố trực thuộc Trung ương", lat: 10.0452, lng: 105.7469 },
+  { name: "Đà Nẵng", code: 48, divisionType: "Thành phố trực thuộc Trung ương", lat: 16.0544, lng: 108.2022 },
+  { name: "Đắk Lắk", code: 66, divisionType: "Tỉnh", lat: 12.8333, lng: 108 },
+  { name: "Điện Biên", code: 11, divisionType: "Tỉnh", lat: 21.3853, lng: 103.0169 },
+  { name: "Đồng Nai", code: 75, divisionType: "Tỉnh", lat: 10.9574, lng: 106.8226 },
+  { name: "Đồng Tháp", code: 82, divisionType: "Tỉnh", lat: 10.4682, lng: 105.659 },
+  { name: "Gia Lai", code: 52, divisionType: "Tỉnh", lat: 13.9833, lng: 108 },
+  { name: "Hà Nội", code: 1, divisionType: "Thành phố trực thuộc Trung ương", lat: 21.0285, lng: 105.8542 },
+  { name: "Hà Tĩnh", code: 42, divisionType: "Tỉnh", lat: 18.3333, lng: 105.9 },
+  { name: "Hải Phòng", code: 31, divisionType: "Thành phố trực thuộc Trung ương", lat: 20.8449, lng: 106.6881 },
+  { name: "Hồ Chí Minh", code: 79, divisionType: "Thành phố trực thuộc Trung ương", lat: 10.8231, lng: 106.6297 },
+  { name: "Huế", code: 46, divisionType: "Thành phố trực thuộc Trung ương", lat: 16.4667, lng: 107.6 },
+  { name: "Hưng Yên", code: 33, divisionType: "Tỉnh", lat: 20.6464, lng: 106.0511 },
+  { name: "Khánh Hòa", code: 56, divisionType: "Tỉnh", lat: 12.2388, lng: 109.1967 },
+  { name: "Lai Châu", code: 12, divisionType: "Tỉnh", lat: 22.3969, lng: 103.4619 },
+  { name: "Lạng Sơn", code: 20, divisionType: "Tỉnh", lat: 21.8492, lng: 106.7578 },
+  { name: "Lào Cai", code: 15, divisionType: "Tỉnh", lat: 22.4833, lng: 103.9667 },
+  { name: "Lâm Đồng", code: 68, divisionType: "Tỉnh", lat: 11.5833, lng: 108 },
+  { name: "Nghệ An", code: 40, divisionType: "Tỉnh", lat: 18.6734, lng: 105.6813 },
+  { name: "Ninh Bình", code: 37, divisionType: "Tỉnh", lat: 20.2539, lng: 105.975 },
+  { name: "Phú Thọ", code: 25, divisionType: "Tỉnh", lat: 21.3167, lng: 105.2167 },
+  { name: "Quảng Ngãi", code: 51, divisionType: "Tỉnh", lat: 15.1167, lng: 108.8 },
+  { name: "Quảng Ninh", code: 22, divisionType: "Tỉnh", lat: 21.0069, lng: 107.2925 },
+  { name: "Quảng Trị", code: 44, divisionType: "Tỉnh", lat: 16.75, lng: 107.1833 },
+  { name: "Sơn La", code: 14, divisionType: "Tỉnh", lat: 21.3333, lng: 103.9 },
+  { name: "Tây Ninh", code: 80, divisionType: "Tỉnh", lat: 11.3, lng: 106.1333 },
+  { name: "Thái Nguyên", code: 19, divisionType: "Tỉnh", lat: 21.6, lng: 105.8167 },
+  { name: "Thanh Hóa", code: 38, divisionType: "Tỉnh", lat: 19.8067, lng: 105.7764 },
+  { name: "Tuyên Quang", code: 8, divisionType: "Tỉnh", lat: 21.8167, lng: 105.2167 },
+  { name: "Vĩnh Long", code: 86, divisionType: "Tỉnh", lat: 10.25, lng: 105.9667 },
+];
