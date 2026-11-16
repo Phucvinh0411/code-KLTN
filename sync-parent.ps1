@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$Message = "chore: sync code from all child repositories ($(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))"
 )
 
