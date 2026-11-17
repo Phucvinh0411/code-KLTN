@@ -8,6 +8,13 @@ Hệ thống cho phép **Chủ hàng (Shipper)** đăng đơn vận chuyển dư
 
 ## 📂 1. Cấu trúc các Phân hệ (Repositories)
 
+> [!IMPORTANT]
+> **Lưu ý quan trọng khi đọc mã nguồn (Tránh nhầm lẫn về kiến trúc Polyglot):**
+> Hệ thống sử dụng kiến trúc **Polyglot Microservices** kết hợp **Spring Boot (Java 21)** và **NestJS (Node.js/TypeScript)**:
+> 1. **Chức năng Đăng đơn hàng mới của Chủ hàng (`Order Service`):** Không tách thành microservice tên `order-service` riêng mà được thiết kế hợp nhất trong **Module `auction` của `bidding-service`** ([`backhaulbid-node-services/apps/bidding/src/modules/auction`](./backhaulbid-node-services/apps/bidding/src/modules/auction)). Mỗi đơn vận chuyển do Shipper đăng chính là một thực thể `Auction` chứa đầy đủ thông tin lô hàng, lộ trình GIS và cấu hình đấu giá.
+> 2. **Mã nguồn `bidding-service` (Phòng đấu giá Real-time & Chốt thầu):** Nằm tại [`backhaulbid-node-services/apps/bidding`](./backhaulbid-node-services/apps/bidding/src) (không nằm trong thư mục Java `backhaulbid-core-services`). Khi Shipper đăng đơn, `bidding-service` gọi sang `fleet-service` để chạy **Thuật toán tối ưu Hungarian $O(K^3)$** ([`MatchingService.java`](./backhaulbid-core-services/fleet-service/src/main/java/iuh/fit/se/fleetservice/service/MatchingService.java)).
+> 3. **Mã nguồn `notification-service` (WebSocket Gateway & Push Notification):** Đã được chuyển sang viết bằng NestJS + Socket.IO + RabbitMQ tại [`backhaulbid-node-services/apps/notification`](./backhaulbid-node-services/apps/notification/src) (do đó module `notification-service` cũ trong `backhaulbid-core-services/pom.xml` được đóng chú thích).
+
 Dự án được tổ chức gồm **5 phân hệ chính**:
 
 | Thư mục | Công nghệ chính | Vai trò trong hệ thống |
