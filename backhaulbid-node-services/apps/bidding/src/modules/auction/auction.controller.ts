@@ -196,6 +196,21 @@ export class AuctionController {
       normalizeRole(role),
     );
   }
+
+  @Post(':auctionId/approve-fallback')
+  approveFallback(
+    @Param('auctionId') auctionId: string,
+    @Headers('x-user-id') actorId: string | undefined,
+    @Headers('x-user-role') role: string | undefined,
+  ) {
+    requireAuthenticated(actorId);
+    requireRole(role, 'ADMIN', 'SHIPPER');
+    return this.auctionService.approveFallback(
+      auctionId,
+      actorId,
+      normalizeRole(role),
+    );
+  }
 }
 
 function normalizeRole(role: string | undefined) {

@@ -484,6 +484,17 @@ export class AuctionService {
     return this.serialize(auction);
   }
 
+  async approveFallback(auctionId: string, actorId: string, role: string) {
+    const auction = await this.auctionRepo.findById(auctionId);
+    if (!auction) throw new NotFoundException('Auction not found');
+    this.assertOwnerOrAdmin(auction, actorId, role);
+    const updated = await this.awardService.approveFallbackCandidate(
+      auctionId,
+      auction.shipperId,
+    );
+    return this.serialize(updated);
+  }
+
   /**
    * The owner's list of value documents with the checklist state. Only the auction's shipper or an admin may call it,
    * so no bidder or other shipper learns which documents exist.
@@ -641,10 +652,23 @@ export class AuctionService {
   }
 
   private async ensureAward(auction: AuctionDocument) {
-    if (auction.awardStatus === 'CREATED' || auction.awardStatus === 'NO_WINNER') return;
-    if (!auction.winningBidId && auction.auctionType === AuctionType.SEALED) return;
+    if (
+      auction.awardStatus === 'CREATED' ||
+      auction.awardStatus === 'NO_WINNER' ||
+      auction.awardStatus === 'CANCELLED_NO_BIDS'
+    ) {
+      return;
+    }
+    if (!auction.winningBidId && auction.auctionType === AuctionType.SEALED) {
+      const bidCount = await this.bidModel
+        .countDocuments({ auctionId: auction._id })
+        .exec();
+      if (bidCount > 0) return;
+    }
     const winningBid = auction.winningBidId
-      ? await this.bidModel.findOne({ _id: auction.winningBidId, auctionId: auction._id }).exec()
+      ? await this.bidModel
+          .findOne({ _id: auction.winningBidId, auctionId: auction._id })
+          .exec()
       : null;
     await this.awardService.createForWinner(auction, winningBid);
   }
@@ -787,6 +811,7 @@ export class AuctionService {
     const attempts = auction.awardAttempts ?? [];
     const current = attempts.find((attempt) =>
       [
+        'PENDING_SHIPPER_APPROVAL',
         'CREATING',
         'CREATION_FAILED',
         'AWAITING_CARRIER_SIGNATURE',

@@ -108,6 +108,44 @@ public class InternalWalletService {
         }
     }
 
+    /**
+     * Edge Case 4: Giải tỏa tiền cọc cho nhà xe trượt thầu từ sự kiện RabbitMQ 'auction.unfreeze_losers',
+     * đảm bảo tính toàn vẹn Idempotency với khóa chuẩn: {auctionId}_{userId}_unfreeze.
+     */
+    @Transactional
+    public InternalWalletOperation unfreezeLoserDeposit(
+            String auctionId,
+            UUID userId,
+            UUID holdId,
+            BigDecimal amount,
+            String rawIdempotencyKey) {
+        String idempotencyKey = (rawIdempotencyKey != null && !rawIdempotencyKey.isBlank())
+                ? rawIdempotencyKey.trim()
+                : auctionId + "_" + userId + "_unfreeze";
+
+        Transaction existing = findByOperationKey(idempotencyKey);
+        if (existing != null) {
+            return operation(existing, null);
+        }
+
+        if (holdId != null) {
+            return release(holdId, new InternalWalletReleaseRequest(idempotencyKey));
+        }
+
+        Wallet wallet = walletRepository.findByAccountIdForUpdate(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Wallet not found for user " + userId));
+        try {
+            Transaction transaction = wallet.unfreeze(amount);
+            transaction.setReferenceCode(idempotencyKey);
+            transaction.setIdempotencyKey(idempotencyKey);
+            transaction.setDescription("Unfreeze loser deposit for auction " + auctionId);
+            walletRepository.saveAndFlush(wallet);
+            return persistedOperation(idempotencyKey, false);
+        } catch (IllegalArgumentException | IllegalStateException exception) {
+            throw failure(exception.getMessage());
+        }
+    }
+
     /** Converts the frozen deposit into a penalty after a forfeiture decision. */
     @Transactional
     public InternalWalletOperation forfeit(UUID holdId, InternalWalletReleaseRequest request) {

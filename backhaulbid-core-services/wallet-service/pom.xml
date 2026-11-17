@@ -45,6 +45,12 @@
             <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
         </dependency>
 
+        <!-- Spring Boot AMQP (RabbitMQ) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+
         <!-- PostgreSQL Driver -->
         <dependency>
             <groupId>org.postgresql</groupId>

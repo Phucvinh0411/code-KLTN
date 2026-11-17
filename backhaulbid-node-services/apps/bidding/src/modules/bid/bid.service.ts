@@ -44,7 +44,22 @@ export class BidService {
       }
 
       const auction = await this.auctionService.findById(auctionId);
-      if (auction.status !== AuctionStatus.OPEN || !auction.roomOpen) {
+
+      // Edge Case 1: Kiểm tra thời gian thực của Server (Date.now()) so với endTime trong DB.
+      // Tuyệt đối không tin tưởng cờ isClosed từ phía Client gửi lên để chống trễ mạng ở giây cuối.
+      const serverNowMs = Date.now();
+      const auctionEndMs = new Date(auction.endTime).getTime();
+      if (serverNowMs > auctionEndMs) {
+        throw new ConflictException({
+          code: 'AUCTION_ALREADY_ENDED',
+          message: 'AUCTION_ALREADY_ENDED',
+        });
+      }
+
+      if (
+        auction.status !== AuctionStatus.OPEN ||
+        serverNowMs < new Date(auction.startTime).getTime()
+      ) {
         throw new ConflictException('Auction is not accepting bids');
       }
 

@@ -1,12 +1,25 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { randomUUID } from 'node:crypto';
+import { AuctionStatus } from '../../common/enums/auction-status.enum';
 import { DepositStatus } from '../../common/enums/deposit-status.enum';
 import { RegistrationPaymentStatus } from '../../common/enums/registration-payment-status.enum';
 import { CreationFeeStatus } from '../../common/enums/creation-fee-status.enum';
 import { WalletClient } from '../../integrations/wallet/wallet.client';
-import { ContractAwardClient, ContractRoutePoint } from '../../integrations/contracts/contract-award.client';
+import {
+  UnfreezeLoserItem,
+  WalletRmqPublisher,
+} from '../../integrations/wallet/wallet-rmq.publisher';
+import {
+  ContractAwardClient,
+  ContractRoutePoint,
+} from '../../integrations/contracts/contract-award.client';
 import { LocationDetail } from '../../common/schemas/location.schema';
 import { AuctionNotificationClient } from '../../integrations/notifications/auction-notification.client';
 import {
@@ -14,6 +27,7 @@ import {
   AuctionRegistrationDocument,
 } from '../auction-registration/schemas/auction-registration.schema';
 import { Bid, BidDocument } from '../bid/schemas/bid.schema';
+import { BiddingEventsService } from '../bidding/bidding-events.service';
 import { awardValueSnapshot } from './value-documents';
 import {
   Auction,
@@ -40,18 +54,24 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     private readonly registrationModel: Model<AuctionRegistrationDocument>,
     private readonly contractAwardClient: ContractAwardClient,
     private readonly walletClient: WalletClient,
+    private readonly walletRmqPublisher: WalletRmqPublisher,
     private readonly notificationClient: AuctionNotificationClient,
+    private readonly eventsService: BiddingEventsService,
   ) {}
 
   onModuleInit() {
     this.pollTimer = setInterval(() => {
       void this.processAwardAttempts().catch((error) => {
-        this.logger.error(`Award deadline processing failed: ${this.errorMessage(error)}`);
+        this.logger.error(
+          `Award deadline processing failed: ${this.errorMessage(error)}`,
+        );
       });
     }, AWARD_POLL_INTERVAL_MS);
     this.pollTimer.unref?.();
     void this.processAwardAttempts().catch((error) => {
-      this.logger.error(`Initial award deadline processing failed: ${this.errorMessage(error)}`);
+      this.logger.error(
+        `Initial award deadline processing failed: ${this.errorMessage(error)}`,
+      );
     });
   }
 
@@ -59,8 +79,22 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     if (this.pollTimer) clearInterval(this.pollTimer);
   }
 
-  async createForWinner(auction: AuctionDocument, winningBid: BidDocument | null) {
+  async createForWinner(
+    auction: AuctionDocument,
+    winningBid: BidDocument | null,
+  ) {
     if (!winningBid) {
+      const bidCount = await this.bidModel
+        .countDocuments({ auctionId: auction._id })
+        .exec();
+
+      // Edge Case 2: Phiên kết thúc nhưng mảng bids trống -> Chuyển sang CANCELLED_NO_BIDS
+      // và bắn message RabbitMQ sang wallet-service để hoàn phí tạo phiên cho Shipper.
+      if (bidCount === 0) {
+        await this.handleNoBidsScenario(auction);
+        return;
+      }
+
       auction.awardStatus = 'NO_WINNER';
       auction.awardError = null;
       await auction.save();
@@ -69,9 +103,12 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
 
     if (auction.awardAttempts?.length) {
       const failedCreationIndex = auction.awardAttempts.findIndex(
-        (attempt) => attempt.status === AuctionAwardAttemptStatus.CREATION_FAILED,
+        (attempt) =>
+          attempt.status === AuctionAwardAttemptStatus.CREATION_FAILED,
       );
-      if (failedCreationIndex >= 0) await this.startAttempt(auction, failedCreationIndex);
+      if (failedCreationIndex >= 0) {
+        await this.startAttempt(auction, failedCreationIndex);
+      }
       return;
     }
 
@@ -83,7 +120,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
       .find({ auctionId: auction._id })
       .exec();
     const registrationByCarrier = new Map(
-      registrations.map((registration) => [registration.carrierId, registration]),
+      registrations.map((registration) => [
+        registration.carrierId,
+        registration,
+      ]),
     );
     const selected: BidDocument[] = [winningBid];
     const seenCarriers = new Set([winningBid.carrierId]);
@@ -109,23 +149,25 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
       contractId: null,
       failureReason: null,
     })) as AuctionAwardAttempt[];
-    const claim = await this.auctionModel.updateOne(
-      {
-        _id: auction._id,
-        $or: [
-          { awardAttempts: { $exists: false } },
-          { awardAttempts: { $size: 0 } },
-        ],
-      },
-      {
-        $set: {
-          awardAttempts,
-          awardStatus: 'PENDING',
-          awardError: null,
-          awardCleanupCompleted: false,
+    const claim = await this.auctionModel
+      .updateOne(
+        {
+          _id: auction._id,
+          $or: [
+            { awardAttempts: { $exists: false } },
+            { awardAttempts: { $size: 0 } },
+          ],
         },
-      },
-    ).exec();
+        {
+          $set: {
+            awardAttempts,
+            awardStatus: 'PENDING',
+            awardError: null,
+            awardCleanupCompleted: false,
+          },
+        },
+      )
+      .exec();
     if (claim.matchedCount === 0) return;
 
     auction.awardAttempts = awardAttempts;
@@ -134,7 +176,80 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     await this.startAttempt(auction, 0);
   }
 
+  /**
+   * Edge Case 2: Cronjob/Polling quét các phiên đã hết hạn (endTime <= now)
+   * nhưng không có lượt đặt giá nào -> Chuyển trạng thái sang CANCELLED_NO_BIDS
+   * và phát sự kiện RabbitMQ hoàn phí tạo phiên cho Shipper.
+   */
+  async processExpiredNoBidAuctions() {
+    const now = new Date();
+    const expiredAuctions = await this.auctionModel
+      .find({
+        status: {
+          $in: [
+            AuctionStatus.PENDING,
+            AuctionStatus.OPEN,
+            AuctionStatus.COMPLETED,
+          ],
+        },
+        endTime: { $lte: now },
+        winningBidId: null,
+        awardStatus: { $nin: ['CANCELLED_NO_BIDS', 'NO_WINNER', 'SIGNED'] },
+      })
+      .limit(100)
+      .exec();
+
+    for (const auction of expiredAuctions) {
+      try {
+        const bidCount = await this.bidModel
+          .countDocuments({ auctionId: auction._id })
+          .exec();
+        if (bidCount === 0) {
+          await this.handleNoBidsScenario(auction);
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Failed processing no-bid auction ${auction._id}: ${this.errorMessage(error)}`,
+        );
+      }
+    }
+  }
+
+  private async handleNoBidsScenario(auction: AuctionDocument) {
+    auction.status = AuctionStatus.CANCELLED_NO_BIDS;
+    auction.awardStatus = 'CANCELLED_NO_BIDS';
+    auction.awardError = 'Phiên đấu giá kết thúc nhưng không có nhà xe nào đặt thầu';
+    auction.awardCleanupCompleted = false;
+    await auction.save();
+
+    const depositsReleased = await this.releaseDeposits(auction._id);
+    const feeRefunded = await this.refundCreationFeeViaRabbitMQ(auction);
+
+    this.eventsService.emitAuctionStatusChanged({
+      auctionId: auction._id,
+      status: AuctionStatus.CANCELLED_NO_BIDS,
+      roomOpen: false,
+      endTime: auction.endTime,
+    });
+
+    await this.notificationClient.notify({
+      userId: auction.shipperId,
+      title: 'Phiên đấu giá kết thúc không có lượt đặt giá',
+      message: `Phiên "${auction.title}" đã kết thúc mà không có nhà xe nào tham gia trả giá. Hệ thống đang hoàn lại phí tạo phiên vào ví của bạn.`,
+      auctionId: auction._id,
+      dedupeKey: `auction:${auction._id}:cancelled-no-bids`,
+      type: 'AUCTION_CANCELLED_NO_BIDS',
+    });
+
+    if (depositsReleased && feeRefunded) {
+      auction.awardCleanupCompleted = true;
+      await auction.save();
+    }
+  }
+
   async processAwardAttempts() {
+    await this.processExpiredNoBidAuctions();
+
     const auctions = await this.auctionModel
       .find({
         awardAttempts: {
@@ -170,7 +285,7 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
           attempt.status === AuctionAwardAttemptStatus.CREATION_FAILED ||
           attempt.status === AuctionAwardAttemptStatus.CREATING
         ) {
-          await this.startAttempt(auction, index);
+          await this.startAttempt(auction, index, true);
           continue;
         }
         if (!attempt.contractId) continue;
@@ -182,8 +297,12 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
         }
 
         if (status.carrierSigned && !status.shipperSigned) {
-          if (attempt.status !== AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE) {
-            attempt.status = AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE;
+          if (
+            attempt.status !==
+            AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE
+          ) {
+            attempt.status =
+              AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE;
             attempt.signingDeadlineAt = status.signingDeadlineAt
               ? new Date(status.signingDeadlineAt)
               : null;
@@ -195,10 +314,17 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
         const deadline = status.signingDeadlineAt
           ? new Date(status.signingDeadlineAt)
           : attempt.signingDeadlineAt;
-        if (status.status === 'EXPIRED' || (deadline && deadline.getTime() <= Date.now())) {
+        if (
+          status.status === 'EXPIRED' ||
+          (deadline && deadline.getTime() <= Date.now())
+        ) {
           status = await this.contractAwardClient.expire(attempt.attemptId);
           if (status.status === 'EXPIRED' || status.status === 'CANCELLED') {
-            await this.finishExpiredAttempt(auction, attempt, status.carrierSigned);
+            await this.finishExpiredAttempt(
+              auction,
+              attempt,
+              status.carrierSigned,
+            );
           }
         }
       } catch (error) {
@@ -208,25 +334,7 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    await this.retryExpiredCarrierDeposits();
     await this.retryTerminalActions();
-  }
-
-  private async retryExpiredCarrierDeposits() {
-    const auctions = await this.auctionModel
-      .find({
-        awardAttempts: {
-          $elemMatch: { status: AuctionAwardAttemptStatus.CARRIER_EXPIRED },
-        },
-      })
-      .limit(100)
-      .exec();
-    for (const auction of auctions) {
-      for (const attempt of auction.awardAttempts) {
-        if (attempt.status !== AuctionAwardAttemptStatus.CARRIER_EXPIRED) continue;
-        await this.releaseCarrierDeposit(auction._id, attempt.carrierId, attempt.attemptId);
-      }
-    }
   }
 
   private async retryTerminalActions() {
@@ -234,7 +342,12 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
       .find({
         awardCleanupCompleted: { $ne: true },
         awardStatus: {
-          $in: ['SIGNED', 'NO_CARRIER_SIGNED', 'SHIPPER_SIGNATURE_EXPIRED'],
+          $in: [
+            'SIGNED',
+            'NO_CARRIER_SIGNED',
+            'SHIPPER_SIGNATURE_EXPIRED',
+            'CANCELLED_NO_BIDS',
+          ],
         },
       })
       .limit(100)
@@ -243,9 +356,13 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     for (const auction of auctions) {
       try {
         let cleanupCompleted = false;
-        if (auction.awardStatus === 'NO_CARRIER_SIGNED') {
+        if (auction.awardStatus === 'CANCELLED_NO_BIDS') {
           const depositsReleased = await this.releaseDeposits(auction._id);
-          const feeRefunded = await this.refundCreationFee(auction);
+          const feeRefunded = await this.refundCreationFeeViaRabbitMQ(auction);
+          cleanupCompleted = depositsReleased && feeRefunded;
+        } else if (auction.awardStatus === 'NO_CARRIER_SIGNED') {
+          const depositsReleased = await this.releaseDeposits(auction._id);
+          const feeRefunded = await this.refundCreationFeeViaRabbitMQ(auction);
           await this.notifyNoCarrierSigned(auction, feeRefunded);
           cleanupCompleted = depositsReleased && feeRefunded;
         } else if (auction.awardStatus === 'SHIPPER_SIGNATURE_EXPIRED') {
@@ -254,7 +371,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
           const winner = auction.awardAttempts.find(
             (attempt) => attempt.status === AuctionAwardAttemptStatus.SIGNED,
           );
-          cleanupCompleted = await this.releaseDeposits(auction._id, winner?.carrierId);
+          cleanupCompleted = await this.releaseDeposits(
+            auction._id,
+            winner?.carrierId,
+          );
           if (winner) {
             await this.notifyShipperContractSigned(auction, winner);
             await this.notifyCarrierContractSigned(auction, winner);
@@ -272,17 +392,69 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async startAttempt(auction: AuctionDocument, index: number) {
-    for (let currentIndex = index; currentIndex < auction.awardAttempts.length; currentIndex++) {
+  /**
+   * Bắt đầu xét trao thầu cho ứng viên ở vị trí `index`.
+   * Edge Case 3: Khi đôn lên ứng viên dự phòng (currentIndex > 0, ví dụ Top 2 sau khi Top 1 hủy hợp đồng),
+   * hệ thống so sánh giá thầu của ứng viên dự phòng với `maxBudget` của Shipper:
+   * - Nếu `bidPrice <= maxBudget`: Tự động trao thầu.
+   * - Nếu `bidPrice > maxBudget`: Chuyển sang `PENDING_SHIPPER_APPROVAL` và gửi thông báo hỏi ý kiến Shipper.
+   */
+  private async startAttempt(
+    auction: AuctionDocument,
+    index: number,
+    shipperApproved = false,
+  ) {
+    for (
+      let currentIndex = index;
+      currentIndex < auction.awardAttempts.length;
+      currentIndex++
+    ) {
       const attempt = auction.awardAttempts[currentIndex];
       const registration = await this.registrationModel
         .findOne({ auctionId: auction._id, carrierId: attempt.carrierId })
         .exec();
       if (!this.isEligible(registration, auction.isDepositRequired)) {
         attempt.status = AuctionAwardAttemptStatus.SKIPPED;
-        attempt.failureReason = 'Nhà xe không còn đăng ký hoặc không đủ điều kiện thanh toán';
+        attempt.failureReason =
+          'Nhà xe không còn đăng ký hoặc không đủ điều kiện thanh toán';
         await auction.save();
         continue;
+      }
+
+      // Edge Case 3: Kiểm soát giá đôn thầu dự phòng (Fallback Award Price Gap)
+      if (currentIndex > 0 && !shipperApproved) {
+        const candidateBidPrice = Number(attempt.bidAmount);
+        const maxBudgetRaw = auction.maxBudget ?? auction.maxPrice;
+        const maxBudget = Number(maxBudgetRaw.toString());
+
+        if (
+          Number.isFinite(candidateBidPrice) &&
+          Number.isFinite(maxBudget) &&
+          candidateBidPrice > maxBudget
+        ) {
+          attempt.status = AuctionAwardAttemptStatus.PENDING_SHIPPER_APPROVAL;
+          attempt.failureReason = `Giá thầu dự phòng (${attempt.bidAmount}) vượt ngân sách trần maxBudget (${maxBudget.toFixed(2)}), chờ Shipper phê duyệt`;
+          auction.winningBidId = attempt.bidId;
+          auction.status = AuctionStatus.PENDING_SHIPPER_APPROVAL;
+          auction.awardStatus = 'PENDING_SHIPPER_APPROVAL';
+          auction.awardError = attempt.failureReason;
+          await auction.save();
+
+          this.eventsService.emitAuctionStatusChanged({
+            auctionId: auction._id,
+            status: AuctionStatus.PENDING_SHIPPER_APPROVAL,
+            roomOpen: false,
+            endTime: auction.endTime,
+            winningBidAmount: attempt.bidAmount,
+          });
+
+          await this.notifyShipperFallbackApprovalRequired(
+            auction,
+            attempt,
+            maxBudget.toFixed(2),
+          );
+          return;
+        }
       }
 
       const deadlineAt = new Date(Date.now() + SIGNING_WINDOW_MS);
@@ -290,6 +462,7 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
       attempt.signingDeadlineAt = deadlineAt;
       attempt.failureReason = null;
       auction.winningBidId = attempt.bidId;
+      auction.status = AuctionStatus.COMPLETED;
       auction.awardStatus = 'CREATING_CONTRACT';
       auction.awardError = null;
       await auction.save();
@@ -307,17 +480,17 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
           pickupPoint: this.routePoint(auction.pickupLocation),
           deliveryPoint: this.routePoint(auction.deliveryLocation),
           agreedPrice: attempt.bidAmount,
-          expectedDeliveryAt: auction.deliveryLocation?.latestTime?.toISOString() ?? null,
+          expectedDeliveryAt:
+            auction.deliveryLocation?.latestTime?.toISOString() ?? null,
           depositHoldId:
             registration.depositStatus === DepositStatus.LOCKED
               ? registration.depositHoldId
               : null,
           depositAmount:
             registration.depositStatus === DepositStatus.LOCKED
-              ? registration.depositAmount?.toString() ?? null
+              ? (registration.depositAmount?.toString() ?? null)
               : null,
           signingDeadlineAt: deadlineAt.toISOString(),
-          // The same snapshot for every attempt of this auction: documents cannot change once it has completed.
           ...awardValueSnapshot(auction),
         });
         attempt.status = AuctionAwardAttemptStatus.AWAITING_CARRIER_SIGNATURE;
@@ -339,6 +512,25 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     }
 
     await this.finishWithoutCarrier(auction);
+  }
+
+  /**
+   * Cho phép Shipper phê duyệt trao thầu cho nhà xe dự phòng có giá vượt maxBudget.
+   */
+  async approveFallbackCandidate(auctionId: string, shipperId: string) {
+    const auction = await this.auctionModel.findById(auctionId).exec();
+    if (!auction || auction.shipperId !== shipperId) {
+      throw new Error('Không tìm thấy phiên đấu giá hoặc không có quyền duyệt');
+    }
+    const index = auction.awardAttempts.findIndex(
+      (attempt) =>
+        attempt.status === AuctionAwardAttemptStatus.PENDING_SHIPPER_APPROVAL,
+    );
+    if (index < 0) {
+      throw new Error('Không có nhà xe dự phòng nào đang chờ phê duyệt');
+    }
+    await this.startAttempt(auction, index, true);
+    return auction;
   }
 
   private async finishExpiredAttempt(
@@ -363,13 +555,21 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Nhà xe Top 1 hủy/quá hạn ký hợp đồng -> Tịch thu cọc (forfeit) và đôn lên nhà xe dự phòng tiếp theo
     attempt.status = AuctionAwardAttemptStatus.CARRIER_EXPIRED;
-    attempt.failureReason = 'Nhà xe không ký hợp đồng đúng hạn';
+    attempt.failureReason = 'Nhà xe không ký hợp đồng đúng hạn (mất cọc)';
     await auction.save();
-    await this.releaseCarrierDeposit(auction._id, attempt.carrierId, attempt.attemptId);
+    await this.forfeitCarrierDeposit(
+      auction._id,
+      attempt.carrierId,
+      attempt.attemptId,
+    );
     await this.notifyCarrierExpired(auction, attempt);
     await this.notifyShipperCarrierExpired(auction, attempt);
-    await this.startAttempt(auction, auction.awardAttempts.indexOf(attempt) + 1);
+    await this.startAttempt(
+      auction,
+      auction.awardAttempts.indexOf(attempt) + 1,
+    );
   }
 
   private async finishSignedAttempt(
@@ -384,7 +584,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     auction.winningBidId = attempt.bidId;
     auction.awardTripId = attempt.tripId;
     await auction.save();
-    const cleanupCompleted = await this.releaseDeposits(auction._id, attempt.carrierId);
+    const cleanupCompleted = await this.releaseDeposits(
+      auction._id,
+      attempt.carrierId,
+    );
     await this.notifyShipperContractSigned(auction, attempt);
     await this.notifyCarrierContractSigned(auction, attempt);
     if (cleanupCompleted) {
@@ -395,11 +598,12 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
 
   private async finishWithoutCarrier(auction: AuctionDocument) {
     auction.awardStatus = 'NO_CARRIER_SIGNED';
-    auction.awardError = 'Người thắng và các nhà xe dự phòng đều không ký hợp đồng đúng hạn';
+    auction.awardError =
+      'Người thắng và các nhà xe dự phòng đều không ký hợp đồng đúng hạn';
     auction.awardCleanupCompleted = false;
     await auction.save();
     const depositsReleased = await this.releaseDeposits(auction._id);
-    const feeRefunded = await this.refundCreationFee(auction);
+    const feeRefunded = await this.refundCreationFeeViaRabbitMQ(auction);
     await this.notifyNoCarrierSigned(auction, feeRefunded);
     if (depositsReleased && feeRefunded) {
       auction.awardCleanupCompleted = true;
@@ -426,34 +630,64 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private async refundCreationFee(auction: AuctionDocument): Promise<boolean> {
+  /**
+   * Edge Case 2: Bắn sự kiện qua RabbitMQ sang wallet-service để hoàn phí tạo phiên (Creation Fee) cho Shipper.
+   */
+  private async refundCreationFeeViaRabbitMQ(
+    auction: AuctionDocument,
+  ): Promise<boolean> {
     if (auction.creationFeeStatus === CreationFeeStatus.REFUNDED) return true;
     const amount = auction.creationFeeAmount?.toString();
     if (!amount || Number(amount) <= 0) return true;
 
     auction.creationFeeStatus = CreationFeeStatus.REFUND_PENDING;
     await auction.save();
+
+    const idempotencyKey = `auction_creation_fee_${auction._id}:refund`;
+    const published = await this.walletRmqPublisher.publishRefundCreationFee({
+      auctionId: auction._id,
+      shipperId: auction.shipperId,
+      amount,
+      purpose: 'AUCTION_CREATION_FEE_REFUND',
+      idempotencyKey,
+      occurredAt: new Date().toISOString(),
+    });
+
+    if (published) {
+      auction.creationFeeStatus = CreationFeeStatus.REFUNDED;
+      await auction.save();
+      return true;
+    }
+
+    // Fallback HTTP nếu RabbitMQ chưa sẵn sàng
     try {
       const result = await this.walletClient.refund(auction.shipperId, {
         auctionId: auction._id,
         amount,
         purpose: 'AUCTION_CREATION_FEE_REFUND',
-        idempotencyKey: `auction_creation_fee_${auction._id}:refund`,
+        idempotencyKey,
       });
       auction.creationFeeStatus = CreationFeeStatus.REFUNDED;
       auction.creationFeeTransactionId = result.transactionId;
       await auction.save();
       return true;
     } catch (error) {
-      auction.creationFeeStatus = CreationFeeStatus.REFUND_RECONCILIATION_REQUIRED;
-      auction.awardError = `Không hoàn được phí tạo phiên: ${this.errorMessage(error)}`.slice(0, 500);
+      auction.creationFeeStatus =
+        CreationFeeStatus.REFUND_RECONCILIATION_REQUIRED;
+      auction.awardError =
+        `Không hoàn được phí tạo phiên: ${this.errorMessage(error)}`.slice(
+          0,
+          500,
+        );
       await auction.save();
-      this.logger.error(`Creation fee refund needs reconciliation for ${auction._id}`);
+      this.logger.error(
+        `Creation fee refund needs reconciliation for ${auction._id}`,
+      );
       return false;
     }
   }
 
-  private async releaseCarrierDeposit(
+  private async forfeitCarrierDeposit(
     auctionId: string,
     carrierId: string,
     attemptId: string,
@@ -461,48 +695,71 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     const registration = await this.registrationModel
       .findOne({ auctionId, carrierId })
       .exec();
-    if (!registration) return;
-    await this.releaseRegistrationDeposit(registration, `award-attempt:${attemptId}`);
+    if (
+      !registration ||
+      registration.depositStatus !== DepositStatus.LOCKED ||
+      !registration.depositHoldId
+    ) {
+      return;
+    }
+    try {
+      await this.walletClient.forfeit(
+        registration.depositHoldId,
+        `${auctionId}_${carrierId}_forfeit_${attemptId}`,
+      );
+      registration.depositStatus = DepositStatus.FORFEITED;
+      await registration.save();
+    } catch (error) {
+      this.logger.warn(
+        `Could not forfeit deposit for registration ${registration._id}: ${this.errorMessage(error)}`,
+      );
+    }
   }
 
-  private async releaseDeposits(auctionId: string, keepCarrierId?: string): Promise<boolean> {
+  /**
+   * Edge Case 4: Hoàn cọc cho danh sách các nhà xe trượt thầu bất đồng bộ qua RabbitMQ
+   * (event 'auction.unfreeze_losers') với idempotencyKey chuẩn `${auctionId}_${userId}_unfreeze`.
+   */
+  private async releaseDeposits(
+    auctionId: string,
+    keepCarrierId?: string,
+  ): Promise<boolean> {
     const registrations = await this.registrationModel
       .find({ auctionId, depositStatus: DepositStatus.LOCKED })
       .exec();
-    let released = true;
-    for (const registration of registrations) {
-      if (keepCarrierId && registration.carrierId === keepCarrierId) continue;
-      const result = await this.releaseRegistrationDeposit(
-        registration,
-        keepCarrierId ? 'award-loser' : 'award-unsuccessful',
-      );
-      if (!result) released = false;
-    }
-    return released;
-  }
 
-  private async releaseRegistrationDeposit(
-    registration: AuctionRegistrationDocument,
-    reason: string,
-  ): Promise<boolean> {
-    if (
-      registration.depositStatus !== DepositStatus.LOCKED ||
-      !registration.depositHoldId
-    ) return registration.depositStatus !== DepositStatus.LOCKED;
-    try {
-      await this.walletClient.release(
-        registration.depositHoldId,
-        `${registration._id}:deposit:${reason}`,
-      );
-      registration.depositStatus = DepositStatus.REFUNDED;
-      await registration.save();
+    const loserRegistrations = registrations.filter(
+      (reg) => !(keepCarrierId && reg.carrierId === keepCarrierId),
+    );
+    if (loserRegistrations.length === 0) {
       return true;
-    } catch (error) {
-      this.logger.warn(
-        `Could not release deposit for registration ${registration._id}: ${this.errorMessage(error)}`,
-      );
-      return false;
     }
+
+    const losers: UnfreezeLoserItem[] = loserRegistrations.map((reg) => ({
+      userId: reg.carrierId,
+      holdId: reg.depositHoldId ?? null,
+      amount: reg.depositAmount?.toString() ?? '0',
+      idempotencyKey: `${auctionId}_${reg.carrierId}_unfreeze`,
+    }));
+
+    const published = await this.walletRmqPublisher.publishUnfreezeLosers({
+      auctionId,
+      losers,
+      occurredAt: new Date().toISOString(),
+    });
+
+    if (published) {
+      for (const reg of loserRegistrations) {
+        reg.depositStatus = DepositStatus.REFUNDED;
+        await reg.save();
+      }
+      return true;
+    }
+
+    this.logger.warn(
+      `[RabbitMQ] Failed to publish auction.unfreeze_losers for auction ${auctionId}; will retry in background worker`,
+    );
+    return false;
   }
 
   private isEligible(
@@ -512,11 +769,30 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     return Boolean(
       registration &&
         registration.paymentStatus === RegistrationPaymentStatus.COMPLETED &&
-        (!depositRequired || registration.depositStatus === DepositStatus.LOCKED),
+        (!depositRequired ||
+          registration.depositStatus === DepositStatus.LOCKED),
     );
   }
 
-  private notifyCarrierInvited(auction: AuctionDocument, attempt: AuctionAwardAttempt) {
+  private notifyShipperFallbackApprovalRequired(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+    maxBudget: string,
+  ) {
+    return this.notificationClient.notify({
+      userId: auction.shipperId,
+      title: 'Cần phê duyệt đôn thầu nhà xe dự phòng',
+      message: `Nhà xe thắng thầu trước đó đã hủy hợp đồng. Nhà xe dự phòng tiếp theo có giá đặt thầu ${attempt.bidAmount} vượt ngân sách trần (${maxBudget}) của bạn. Vui lòng xác nhận đồng ý hoặc từ chối trao thầu.`,
+      auctionId: auction._id,
+      dedupeKey: `auction:${auction._id}:attempt:${attempt.attemptId}:shipper-fallback-approval`,
+      type: 'AUCTION_FALLBACK_APPROVAL_REQUIRED',
+    });
+  }
+
+  private notifyCarrierInvited(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+  ) {
     const deadline = attempt.signingDeadlineAt
       ? new Intl.DateTimeFormat('vi-VN', {
           dateStyle: 'short',
@@ -534,7 +810,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private notifyShipperCarrierInvited(auction: AuctionDocument, attempt: AuctionAwardAttempt) {
+  private notifyShipperCarrierInvited(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+  ) {
     return this.notificationClient.notify({
       userId: auction.shipperId,
       title: 'Đang chờ nhà xe ký hợp đồng',
@@ -545,7 +824,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private notifyShipperSignatureRequired(auction: AuctionDocument, attempt: AuctionAwardAttempt) {
+  private notifyShipperSignatureRequired(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+  ) {
     return this.notificationClient.notify({
       userId: auction.shipperId,
       title: 'Nhà xe đã ký hợp đồng',
@@ -556,7 +838,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private notifyCarrierExpired(auction: AuctionDocument, attempt: AuctionAwardAttempt) {
+  private notifyCarrierExpired(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+  ) {
     return this.notificationClient.notify({
       userId: attempt.carrierId,
       title: 'Lượt nhận chuyến đã hết hạn',
@@ -567,7 +852,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private notifyShipperCarrierExpired(auction: AuctionDocument, attempt: AuctionAwardAttempt) {
+  private notifyShipperCarrierExpired(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+  ) {
     return this.notificationClient.notify({
       userId: auction.shipperId,
       title: 'Nhà xe được xét chưa ký đúng hạn',
@@ -578,7 +866,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private notifyShipperSignatureExpired(auction: AuctionDocument, attempt: AuctionAwardAttempt) {
+  private notifyShipperSignatureExpired(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+  ) {
     return this.notificationClient.notify({
       userId: auction.shipperId,
       title: 'Hợp đồng đã hết hạn ký',
@@ -589,7 +880,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private notifyCarrierAwardClosed(auction: AuctionDocument, attempt: AuctionAwardAttempt) {
+  private notifyCarrierAwardClosed(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+  ) {
     return this.notificationClient.notify({
       userId: attempt.carrierId,
       title: 'Phiên đấu giá đã dừng xét nhà xe',
@@ -600,7 +894,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private notifyShipperContractSigned(auction: AuctionDocument, attempt: AuctionAwardAttempt) {
+  private notifyShipperContractSigned(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+  ) {
     return this.notificationClient.notify({
       userId: auction.shipperId,
       title: 'Hợp đồng đã được ký đầy đủ',
@@ -611,7 +908,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
-  private notifyCarrierContractSigned(auction: AuctionDocument, attempt: AuctionAwardAttempt) {
+  private notifyCarrierContractSigned(
+    auction: AuctionDocument,
+    attempt: AuctionAwardAttempt,
+  ) {
     return this.notificationClient.notify({
       userId: attempt.carrierId,
       title: 'Hợp đồng đã được ký đầy đủ',
@@ -626,10 +926,15 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     return error instanceof Error ? error.message : 'Lỗi không xác định';
   }
 
-  private routePoint(location: LocationDetail | undefined): ContractRoutePoint | null {
+  private routePoint(
+    location: LocationDetail | undefined,
+  ): ContractRoutePoint | null {
     if (!location) return null;
-    const hasPin = Number.isFinite(location.latitude) && Number.isFinite(location.longitude)
-      && location.latitude != null && location.longitude != null;
+    const hasPin =
+      Number.isFinite(location.latitude) &&
+      Number.isFinite(location.longitude) &&
+      location.latitude != null &&
+      location.longitude != null;
     return {
       latitude: hasPin ? location.latitude! : null,
       longitude: hasPin ? location.longitude! : null,

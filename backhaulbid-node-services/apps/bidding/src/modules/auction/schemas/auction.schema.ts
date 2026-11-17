@@ -40,6 +40,7 @@ export const AuctionValueDocumentSchema = SchemaFactory.createForClass(AuctionVa
 
 export enum AuctionAwardAttemptStatus {
   QUEUED = 'QUEUED',
+  PENDING_SHIPPER_APPROVAL = 'PENDING_SHIPPER_APPROVAL',
   CREATING = 'CREATING',
   CREATION_FAILED = 'CREATION_FAILED',
   AWAITING_CARRIER_SIGNATURE = 'AWAITING_CARRIER_SIGNATURE',
@@ -147,6 +148,10 @@ export class Auction {
 
   @Prop({ type: MongooseSchema.Types.Decimal128, required: true })
   maxPrice!: Types.Decimal128;
+
+  /** Ngân sách trần tối đa Shipper chấp nhận khi đôn nhà xe dự phòng (mặc định bằng maxPrice nếu không truyền riêng). */
+  @Prop({ type: MongooseSchema.Types.Decimal128, default: null })
+  maxBudget?: Types.Decimal128 | null;
 
   @Prop({ type: MongooseSchema.Types.Decimal128, required: true })
   priceStep!: Types.Decimal128;

@@ -42,6 +42,25 @@ spring:
     baseline-version: 0
     validate-on-migrate: false
 
+  # ──────────────────────────────────────────
+  # RabbitMQ Configuration (Async Unfreeze & Refund Consumer)
+  # ──────────────────────────────────────────
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:backhaulbid}
+    password: ${RABBITMQ_PASSWORD:backhaulbid}
+    listener:
+      simple:
+        acknowledge-mode: auto
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          initial-interval: 1000ms
+          max-attempts: 3
+          multiplier: 2.0
+          max-interval: 10000ms
+
 eureka:
   client:
     service-url:
