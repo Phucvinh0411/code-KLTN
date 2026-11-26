@@ -64,6 +64,11 @@ export const selectWinner = (auctionId, bidId) =>
     .post(biddingPath(`/auctions/${auctionId}/winner`), { bidId })
     .then(unwrapApiData);
 
+export const approveFallbackCarrier = (auctionId) =>
+  apiService
+    .post(biddingPath(`/auctions/${auctionId}/approve-fallback`), {})
+    .then(unwrapApiData);
+
 export const flagAuction = (auctionId, payload) =>
   apiService.post(biddingPath(`/auctions/${auctionId}/fraud-flag`), payload);
 

@@ -7,6 +7,8 @@ export function getAuctionPhase(auction = {}) {
   const status = auction.status;
   const sealed = auction.auctionType === "SEALED";
   if (status === "CANCELLED") return "CANCELLED";
+  if (status === "CANCELLED_NO_BIDS") return "ENDED_NO_WINNER";
+  if (status === "PENDING_SHIPPER_APPROVAL") return "WINNER_DECIDED";
   if (status === "OPEN") return auction.roomOpen === false ? "CLOSING" : "OPEN";
   if (status === "PENDING") return auction.registrationOpen ? "REGISTRATION" : "WAITING_START";
   if (status === "COMPLETED") {
@@ -148,6 +150,7 @@ export const getContractStatusMeta = (status) =>
  */
 export const AWARD_STATUS_META = Object.freeze({
   PENDING: { label: "Đang chuẩn bị hợp đồng", tone: "info", icon: "hourglass" },
+  PENDING_SHIPPER_APPROVAL: { label: "Chờ duyệt đôn thầu dự phòng", tone: "warning", icon: "pending" },
   CREATING_CONTRACT: { label: "Đang tạo hợp đồng", tone: "info", icon: "hourglass" },
   CREATION_FAILED: { label: "Tạo hợp đồng lỗi, hệ thống đang thử lại", tone: "warning", icon: "error" },
   AWAITING_CARRIER_SIGNATURE: { label: "Chờ nhà xe ký hợp đồng", tone: "warning", icon: "draw" },
@@ -156,6 +159,7 @@ export const AWARD_STATUS_META = Object.freeze({
   SHIPPER_SIGNATURE_EXPIRED: { label: "Đã quá hạn ký hợp đồng", tone: "danger", icon: "cancel" },
   NO_CARRIER_SIGNED: { label: "Không nhà xe nào ký", tone: "neutral", icon: "close" },
   NO_WINNER: { label: "Không có giá để trao thầu", tone: "neutral", icon: "close" },
+  CANCELLED_NO_BIDS: { label: "Kết thúc không có giá, đã hoàn phí", tone: "neutral", icon: "close" },
 });
 
 export const getAwardStatusMeta = (status) => (status ? AWARD_STATUS_META[status] || { label: status, tone: "neutral", icon: "help" } : null);
@@ -164,6 +168,7 @@ export const getAwardStatusMeta = (status) => (status ? AWARD_STATUS_META[status
 export function getShipperNextStep(auction = {}) {
   const phase = getAuctionPhase(auction);
   if (phase === "AWAITING_WINNER") return { label: "Chọn người thắng", tone: "danger" };
+  if (auction.awardStatus === "PENDING_SHIPPER_APPROVAL") return { label: "Duyệt nhà xe dự phòng", tone: "warning" };
   if (auction.awardStatus === "AWAITING_SHIPPER_SIGNATURE") return { label: "Ký hợp đồng", tone: "danger" };
   return null;
 }

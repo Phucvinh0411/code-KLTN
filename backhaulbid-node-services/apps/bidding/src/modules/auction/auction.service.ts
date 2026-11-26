@@ -224,6 +224,8 @@ export class AuctionService {
   }
 
   async list(query: ListAuctionsQueryDto) {
+    await this.synchronizeDueAuctions();
+
     const filter: Record<string, unknown> = {};
     if (query.status) filter.status = query.status;
     if (query.shipperId) filter.shipperId = query.shipperId;
@@ -243,6 +245,40 @@ export class AuctionService {
         totalPages: Math.ceil(totalItems / query.pageSize),
       },
     };
+  }
+
+  /**
+   * Đồng bộ trạng thái các phiên đã tới giờ mở (PENDING -> OPEN) hoặc đã hết giờ (OPEN/PENDING -> COMPLETED/CANCELLED_NO_BIDS)
+   * trước khi truy vấn danh sách để bộ lọc status luôn chính xác 100%.
+   */
+  async synchronizeDueAuctions(): Promise<void> {
+    const now = new Date();
+    const dueToOpen = await this.auctionRepo.find(
+      {
+        status: AuctionStatus.PENDING,
+        startTime: { $lte: now },
+        endTime: { $gt: now },
+      },
+      0,
+      50,
+    );
+    for (const auction of dueToOpen) {
+      auction.status = AuctionStatus.OPEN;
+      await auction.save();
+      this.emitStatus(auction);
+    }
+
+    const dueToClose = await this.auctionRepo.find(
+      {
+        status: { $in: [AuctionStatus.PENDING, AuctionStatus.OPEN] },
+        endTime: { $lte: now },
+      },
+      0,
+      50,
+    );
+    for (const auction of dueToClose) {
+      await this.getAndSynchronizeStatus(auction._id);
+    }
   }
 
   async findById(auctionId: string) {

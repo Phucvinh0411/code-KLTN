@@ -177,12 +177,43 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Edge Case 2: Cronjob/Polling quét các phiên đã hết hạn (endTime <= now)
-   * nhưng không có lượt đặt giá nào -> Chuyển trạng thái sang CANCELLED_NO_BIDS
-   * và phát sự kiện RabbitMQ hoàn phí tạo phiên cho Shipper.
+   * Cronjob/Polling định kỳ:
+   * 1. Tự động mở các phiên PENDING đã tới startTime (PENDING -> OPEN).
+   * 2. Tự động chốt các phiên đã tới endTime:
+   *    - Nếu không có ai đấu giá (bidCount === 0): Chuyển sang CANCELLED_NO_BIDS và hoàn phí tạo phiên qua RabbitMQ (Edge Case 2).
+   *    - Nếu có lượt đặt giá (bidCount > 0): Chuyển sang COMPLETED, tự động chọn giá thấp nhất (với phiên PUBLIC) và kích hoạt trao thầu tạo hợp đồng.
    */
   async processExpiredNoBidAuctions() {
     const now = new Date();
+
+    // 1. Tự động mở các phiên đã tới giờ bắt đầu
+    const dueToOpen = await this.auctionModel
+      .find({
+        status: AuctionStatus.PENDING,
+        startTime: { $lte: now },
+        endTime: { $gt: now },
+      })
+      .limit(100)
+      .exec();
+
+    for (const auction of dueToOpen) {
+      try {
+        auction.status = AuctionStatus.OPEN;
+        await auction.save();
+        this.eventsService.emitAuctionStatusChanged({
+          auctionId: auction._id,
+          status: AuctionStatus.OPEN,
+          roomOpen: true,
+          endTime: auction.endTime,
+        });
+      } catch (error) {
+        this.logger.warn(
+          `Failed auto-opening auction ${auction._id}: ${this.errorMessage(error)}`,
+        );
+      }
+    }
+
+    // 2. Tự động xử lý các phiên đã hết giờ
     const expiredAuctions = await this.auctionModel
       .find({
         status: {
@@ -194,7 +225,16 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
         },
         endTime: { $lte: now },
         winningBidId: null,
-        awardStatus: { $nin: ['CANCELLED_NO_BIDS', 'NO_WINNER', 'SIGNED'] },
+        awardStatus: {
+          $nin: [
+            'CANCELLED_NO_BIDS',
+            'NO_WINNER',
+            'SIGNED',
+            'AWAITING_CARRIER_SIGNATURE',
+            'AWAITING_SHIPPER_SIGNATURE',
+            'PENDING_SHIPPER_APPROVAL',
+          ],
+        },
       })
       .limit(100)
       .exec();
@@ -206,10 +246,40 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
           .exec();
         if (bidCount === 0) {
           await this.handleNoBidsScenario(auction);
+          continue;
+        }
+
+        // Phiên có lượt đặt giá: chuyển sang COMPLETED và tự động trao thầu nếu là phiên PUBLIC
+        if (auction.status !== AuctionStatus.COMPLETED) {
+          auction.status = AuctionStatus.COMPLETED;
+        }
+        if (auction.auctionType === 'PUBLIC') {
+          const winningBid = await this.bidModel
+            .findOne({ auctionId: auction._id })
+            .sort({ bidAmount: 1, bidTime: 1 })
+            .exec();
+          auction.winningBidId = winningBid?._id ?? null;
+          await auction.save();
+          await this.createForWinner(auction, winningBid);
+          this.eventsService.emitAuctionStatusChanged({
+            auctionId: auction._id,
+            status: auction.status,
+            roomOpen: false,
+            endTime: auction.endTime,
+            winningBidAmount: winningBid?.bidAmount?.toString() ?? null,
+          });
+        } else {
+          await auction.save();
+          this.eventsService.emitAuctionStatusChanged({
+            auctionId: auction._id,
+            status: AuctionStatus.COMPLETED,
+            roomOpen: false,
+            endTime: auction.endTime,
+          });
         }
       } catch (error) {
         this.logger.warn(
-          `Failed processing no-bid auction ${auction._id}: ${this.errorMessage(error)}`,
+          `Failed processing expired auction ${auction._id}: ${this.errorMessage(error)}`,
         );
       }
     }

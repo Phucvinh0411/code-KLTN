@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
 import { useGlobalNotification } from "@/components/common/NotificationPopup";
 import { emptyRouteService, EmptyRoute } from '@/services/emptyRouteService';
 import { identityApi } from '@/services/identityApi';
@@ -106,7 +107,7 @@ export default function FleetManagerDashboard() {
       setEmptyRoutes((prevRoutes) => 
         prevRoutes.map(route => 
           route.id === eventData.routeId 
-            ? { ...route, status: 'MATCHED' } 
+            ? { ...route, status: 'MATCHED', matchedOrderId: eventData.orderId } 
             : route
         )
       );
@@ -365,9 +366,33 @@ export default function FleetManagerDashboard() {
                             </div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                            <button className="text-brand hover:text-brand transition-colors">
-                              Chi tiết
-                            </button>
+                            <div className="flex items-center gap-3">
+                              <Link
+                                href={(route as EmptyRoute & { matchedOrderId?: string }).matchedOrderId
+                                  ? `/carrier/auctions/${encodeURIComponent((route as EmptyRoute & { matchedOrderId?: string }).matchedOrderId!)}`
+                                  : '/carrier/auctions'}
+                                className="text-brand hover:underline transition-colors"
+                              >
+                                {(route as EmptyRoute & { matchedOrderId?: string }).matchedOrderId ? 'Vào phiên khớp' : 'Xem phiên đấu giá'}
+                              </Link>
+                              {route.status === 'PENDING' && (
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      await emptyRouteService.cancelEmptyRoute(route.id);
+                                      notify.success('Đã hủy chuyến xe rỗng.');
+                                      await loadRoutes();
+                                    } catch (error) {
+                                      notify.error(getApiErrorMessage(error, 'Không thể hủy chuyến xe rỗng.'));
+                                    }
+                                  }}
+                                  className="text-danger hover:underline transition-colors"
+                                >
+                                  Hủy tuyến
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))

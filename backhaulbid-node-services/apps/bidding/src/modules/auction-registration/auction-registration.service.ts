@@ -197,7 +197,10 @@ export class AuctionRegistrationService {
     }
 
     const now = new Date();
-    if (auction.status === AuctionStatus.CANCELLED) {
+    if (
+      auction.status === AuctionStatus.CANCELLED ||
+      auction.status === AuctionStatus.CANCELLED_NO_BIDS
+    ) {
       return {
         ...reputation,
         canRegister: false,
@@ -205,7 +208,11 @@ export class AuctionRegistrationService {
         accessStatus: 'AUCTION_CANCELLED',
       };
     }
-    if (auction.status === AuctionStatus.COMPLETED || now >= auction.endTime) {
+    if (
+      auction.status === AuctionStatus.COMPLETED ||
+      auction.status === AuctionStatus.PENDING_SHIPPER_APPROVAL ||
+      now >= auction.endTime
+    ) {
       return {
         ...reputation,
         canRegister: false,
@@ -431,7 +438,9 @@ export class AuctionRegistrationService {
     }
     if (
       auction.status === AuctionStatus.CANCELLED ||
-      auction.status === AuctionStatus.COMPLETED
+      auction.status === AuctionStatus.CANCELLED_NO_BIDS ||
+      auction.status === AuctionStatus.COMPLETED ||
+      auction.status === AuctionStatus.PENDING_SHIPPER_APPROVAL
     ) {
       throw new ConflictException('Auction is not accepting registrations');
     }

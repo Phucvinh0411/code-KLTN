@@ -12,7 +12,7 @@ import { useGlobalNotification } from "@/components/common/NotificationPopup";
 import { ErrorState, ListSkeleton, Panel, ResponsiveDialog, StatusBadge } from "@/components/ui";
 import AuctionDetailContent from "@/components/carrier/auction-detail/AuctionDetailContent";
 import { getApiErrorMessage } from "@/services/errorMessage";
-import { getAuction, listBids, selectWinner } from "@/services/biddingApi";
+import { approveFallbackCarrier, getAuction, listBids, selectWinner } from "@/services/biddingApi";
 import { carrierProfileApi } from "@/services/carrierProfileApi";
 import { mapCarrierProfile } from "@/services/carrierProfileMapper";
 import { AUCTION_TYPE_META, getAuctionPhase, getAuctionPhaseMeta, getAwardStatusMeta } from "@/lib/statusMeta";
@@ -25,6 +25,7 @@ const OPEN_REFRESH_MS = 30000;
 
 const AWARD_TEXT = {
   PENDING: "Đang chuẩn bị hợp đồng cho nhà xe thắng.",
+  PENDING_SHIPPER_APPROVAL: "Nhà xe thắng trước đó không ký đúng hạn. Giá của nhà xe dự phòng tiếp theo vượt ngân sách trần của bạn, vui lòng phê duyệt để trao thầu.",
   CREATING_CONTRACT: "Đang tạo hợp đồng cho nhà xe được xét.",
   AWAITING_CARRIER_SIGNATURE: "Đang chờ nhà xe được xét ký hợp đồng. Quá hạn, hệ thống mời nhà xe dự phòng kế tiếp theo thứ tự giá.",
   AWAITING_SHIPPER_SIGNATURE: "Nhà xe đã ký. Đến lượt bạn ký hợp đồng trước hạn.",
@@ -33,9 +34,10 @@ const AWARD_TEXT = {
   SHIPPER_SIGNATURE_EXPIRED: "Bạn đã quá hạn ký; hệ thống dừng xét nhà xe dự phòng.",
   CREATION_FAILED: "Tạo hợp đồng gặp lỗi; hệ thống sẽ thử lại.",
   NO_WINNER: "Phiên kết thúc mà không có giá nào.",
+  CANCELLED_NO_BIDS: "Phiên kết thúc mà không có nhà xe nào đặt giá. Phí tạo phiên đã được hoàn vào ví của bạn.",
 };
 
-function AwardProgress({ auction }) {
+function AwardProgress({ auction, onApproveFallback, approvingFallback }) {
   const meta = getAwardStatusMeta(auction.awardStatus);
   if (!meta) return null;
   const progress = auction.awardProgress;
@@ -50,12 +52,17 @@ function AwardProgress({ auction }) {
           {progress.signingDeadlineAt ? ` · Hạn ký ${formatDateTime(progress.signingDeadlineAt)}` : ""}
         </Typography>
       )}
-      {auction.awardStatus === "NO_CARRIER_SIGNED" && auction.creationFeeStatus === "REFUNDED" && (
+      {(auction.awardStatus === "NO_CARRIER_SIGNED" || auction.awardStatus === "CANCELLED_NO_BIDS") && auction.creationFeeStatus === "REFUNDED" && (
         <Typography variant="body2" sx={{ color: "success.main", fontWeight: 600, mt: 0.5 }}>
           Phí tạo phiên đã được hoàn vào ví.
         </Typography>
       )}
       <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", mt: 1.5 }}>
+        {auction.awardStatus === "PENDING_SHIPPER_APPROVAL" && onApproveFallback && (
+          <Button variant="contained" color="warning" onClick={onApproveFallback} disabled={approvingFallback}>
+            {approvingFallback ? "Đang phê duyệt..." : "Đồng ý trao thầu cho nhà xe dự phòng"}
+          </Button>
+        )}
         {auction.awardStatus === "AWAITING_SHIPPER_SIGNATURE" && (
           <Button variant="contained" component={Link} href="/shipper/contracts">
             Ký hợp đồng
@@ -81,6 +88,7 @@ export default function AuctionDetailScreen({ id }) {
   const [now, setNow] = useState(() => Date.now());
   const [confirmBid, setConfirmBid] = useState(null);
   const [selecting, setSelecting] = useState(false);
+  const [approvingFallback, setApprovingFallback] = useState(false);
   const [selectError, setSelectError] = useState("");
   const [profile, setProfile] = useState({ open: false, carrier: null, loading: false });
   const selectingRef = useRef(false);
@@ -169,6 +177,20 @@ export default function AuctionDetailScreen({ id }) {
     } finally {
       selectingRef.current = false;
       setSelecting(false);
+    }
+  };
+
+  const handleApproveFallback = async () => {
+    if (approvingFallback) return;
+    setApprovingFallback(true);
+    try {
+      await approveFallbackCarrier(id);
+      notify.success("Đã phê duyệt trao thầu cho nhà xe dự phòng. Hệ thống đang tạo hợp đồng.");
+      await load({ quiet: true });
+    } catch (error) {
+      notify.error(getApiErrorMessage(error, "Chưa thể phê duyệt nhà xe dự phòng. Vui lòng thử lại."));
+    } finally {
+      setApprovingFallback(false);
     }
   };
 
@@ -263,7 +285,7 @@ export default function AuctionDetailScreen({ id }) {
           )}
         </Panel>
 
-        <AwardProgress auction={shipment} />
+        <AwardProgress auction={shipment} onApproveFallback={handleApproveFallback} approvingFallback={approvingFallback} />
 
         <Panel title="Giá các nhà xe đưa ra" subtitle={isSealed ? "Đấu giá kín: chỉ bạn thấy toàn bộ giá." : "Xếp theo giá từ thấp đến cao; cùng giá thì giá đặt sớm hơn đứng trước."} padded={false}>
           {ranked.length === 0 ? (
