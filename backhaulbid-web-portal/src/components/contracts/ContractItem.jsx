@@ -5,6 +5,7 @@ import Typography from "@mui/material/Typography";
 import Button from "@mui/material/Button";
 import { AppCard } from "@/components/common";
 import { RouteLine, StatusBadge } from "@/components/ui";
+import { formatContractCode } from "@/lib/format";
 
 const STATUS_DESIGN = {
   PENDING_SIGNATURE: {
@@ -61,14 +62,14 @@ function deadlineLabel(value) {
     : "";
 }
 
-export default function ContractItem({ contract, partnerLabel = "Đối tác", trackingHref, onSign, onViewDetail }) {
+export default function ContractItem({ contract, partnerLabel = "Đối tác", trackingHref, onSign, onViewDetail, signDisabled = false }) {
   const pending = contract.status === "PENDING_SIGNATURE";
   const deadline = pending ? deadlineLabel(contract.signingDeadlineAt) : "";
   return (
     <AppCard component="article" sx={{ height: "100%" }}>
       <Box sx={{ p: { xs: 2, sm: 2.5 }, display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
         <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 1, flexWrap: "wrap" }}>
-          <Typography variant="caption" sx={{ overflowWrap: "anywhere", color: "text.secondary" }}>{contract.id}</Typography>
+          <Typography variant="caption" sx={{ overflowWrap: "anywhere", color: "text.secondary" }}>{formatContractCode(contract.id)}</Typography>
           <StatusBadge label={getContractStatusDesign(contract.status).label} tone={TONES[contract.status] || "neutral"} />
         </Box>
         <RouteLine from={contract.origin} to={contract.destination} compact />
@@ -83,7 +84,7 @@ export default function ContractItem({ contract, partnerLabel = "Đối tác", t
       </Box>
       <Box sx={{ p: 2, borderTop: "1px solid", borderColor: "divider", display: "flex", flexWrap: "wrap", gap: 1 }}>
         <Button variant="outlined" onClick={() => onViewDetail?.(contract)} sx={{ flex: 1 }}>Chi tiết</Button>
-        {pending && contract.canSign && <Button variant="contained" onClick={() => onSign?.(contract)} sx={{ flex: 1 }}>Xác nhận ký</Button>}
+        {pending && contract.canSign && <Button variant="contained" disabled={signDisabled} onClick={() => onSign?.(contract)} sx={{ flex: 1 }}>Xác nhận ký</Button>}
         {["ACTIVE", "COMPLETED"].includes(contract.status) && trackingHref && <Button variant="contained" href={trackingHref} sx={{ flex: 1 }}>Theo dõi chuyến</Button>}
         {contract.pdfUrl && <Button variant="text" href={contract.pdfUrl} target="_blank" rel="noopener noreferrer">Mở PDF</Button>}
       </Box>

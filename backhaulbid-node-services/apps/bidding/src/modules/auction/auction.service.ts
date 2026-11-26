@@ -3,13 +3,18 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { AuctionDocument } from './schemas/auction.schema';
+import { toAuctionResponse, toAuctionResponses } from './auction.mapper';
 import {
   ownerValueDocumentView,
   parseValueDocumentInputs,
@@ -27,7 +32,10 @@ import { AuctionStatus } from '../../common/enums/auction-status.enum';
 import { AuctionType } from '../../common/enums/auction-type.enum';
 import { CreationFeeStatus } from '../../common/enums/creation-fee-status.enum';
 import { calculateParticipationFee, calculateCreationFee } from './fee-policy';
-import { WalletClient } from '../../integrations/wallet/wallet.client';
+import {
+  WalletClient,
+  WalletClientError,
+} from '../../integrations/wallet/wallet.client';
 import { Bid, BidDocument } from '../bid/schemas/bid.schema';
 import { GlobalEventBus } from '../../common/events';
 import {
@@ -35,12 +43,18 @@ import {
   BiddingEventsService,
 } from '../bidding/bidding-events.service';
 import { AuctionAwardService } from './auction-award.service';
+import { BiddingSagaService } from './bidding-saga.service';
 import { MediaFileClient } from '../../integrations/media/media-file.client';
-import { EkycVerificationClient } from '../../integrations/identity/ekyc-verification.client';
+import { AccountVerificationClient } from '../../integrations/identity/account-verification.client';
 import { confirmedLocation } from '../../common/location-coordinates';
+import { RedisCacheService } from '../../common/redis/redis-cache.service';
 
 @Injectable()
-export class AuctionService {
+export class AuctionService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(AuctionService.name);
+  private dueAuctionsInterval: NodeJS.Timeout | null = null;
+  private synchronizingDueAuctions = false;
+
   constructor(
     private readonly auctionRepo: AuctionRepository,
     @InjectModel(Bid.name)
@@ -49,16 +63,74 @@ export class AuctionService {
     private readonly eventsService: BiddingEventsService,
     private readonly awardService: AuctionAwardService,
     private readonly mediaFiles: MediaFileClient,
-    private readonly ekycClient: EkycVerificationClient,
+    private readonly verificationClient: AccountVerificationClient,
+    @Optional()
+    private readonly biddingSaga?: BiddingSagaService,
+    @Optional()
+    private readonly redis?: RedisCacheService,
   ) {}
+
+  onModuleInit(): void {
+    this.scheduleDueAuctionSynchronization();
+    this.dueAuctionsInterval = setInterval(
+      () => this.scheduleDueAuctionSynchronization(),
+      5_000,
+    );
+    this.dueAuctionsInterval.unref?.();
+  }
+
+  onModuleDestroy(): void {
+    if (this.dueAuctionsInterval) clearInterval(this.dueAuctionsInterval);
+  }
+
+  private scheduleDueAuctionSynchronization(): void {
+    void this.synchronizeDueAuctions().catch((error: unknown) => {
+      this.logger.error(
+        'Could not synchronize due auctions',
+        error instanceof Error ? error.stack : String(error),
+      );
+    });
+  }
+
+  private async synchronizeDueAuctions(): Promise<void> {
+    if (this.synchronizingDueAuctions) return;
+    const lockKey = 'bidding:auction:sync:lock';
+    const lockToken = randomUUID();
+    const acquired =
+      (await this.redis?.tryAcquireLock(lockKey, lockToken, 15_000)) ?? true;
+    if (!acquired) return;
+
+    this.synchronizingDueAuctions = true;
+
+    const now = new Date();
+    const dueFilter = {
+      status: { $in: [AuctionStatus.PENDING, AuctionStatus.OPEN] },
+      $or: [
+        { endTime: { $lte: now } },
+        { status: AuctionStatus.PENDING, startTime: { $lte: now } },
+      ],
+    };
+
+    try {
+      let due = await this.auctionRepo.find(dueFilter, 0, 100);
+      while (due.length > 0) {
+        for (const auction of due) {
+          await this.getAndSynchronizeStatus(String(auction._id));
+        }
+        due = await this.auctionRepo.find(dueFilter, 0, 100);
+      }
+    } finally {
+      this.synchronizingDueAuctions = false;
+      await this.redis?.releaseLock(lockKey, lockToken);
+    }
+  }
 
   async create(
     shipperId: string,
     dto: CreateAuctionDto,
     idempotencyKey?: string,
   ) {
-    await this.ekycClient.assertShipperVerified(shipperId);
-
+    await this.verificationClient.assertVerified(shipperId);
     const creationIdempotencyKey = idempotencyKey?.trim() || undefined;
     if (creationIdempotencyKey) {
       const existing = await this.auctionRepo.findByIdempotencyKey(
@@ -105,18 +177,39 @@ export class AuctionService {
     const deliveryLocation = confirmedLocation(dto.deliveryLocation);
 
     const auctionId = randomUUID();
+    const holdKey = `auction_creation_fee_${auctionId}`;
 
-    const creationFeeHold = await this.walletClient.hold(shipperId, {
-      auctionId,
-      amount: creationFee.amount,
-      purpose: 'AUCTION_CREATION_FEE',
-      idempotencyKey: `auction_creation_fee_${auctionId}`,
-    });
+    await this.biddingSaga?.beginCreationFeeHold(holdKey, auctionId, shipperId);
+
+    let creationFeeHold: Awaited<ReturnType<WalletClient['hold']>>;
+    try {
+      creationFeeHold = await this.walletClient.hold(shipperId, {
+        auctionId,
+        amount: creationFee.amount,
+        purpose: 'AUCTION_CREATION_FEE',
+        idempotencyKey: holdKey,
+      });
+    } catch (error) {
+      if (
+        error instanceof WalletClientError &&
+        error.statusCode !== undefined &&
+        error.statusCode >= 400 &&
+        error.statusCode < 500
+      ) {
+        await this.biddingSaga?.markCreationFeeCompensated(holdKey);
+      }
+      throw error;
+    }
     if (!creationFeeHold.holdId) {
       throw new ServiceUnavailableException(
         'Wallet service did not return a valid creation fee hold',
       );
     }
+
+    await this.biddingSaga?.claimCreationFeeHoldForCommit(
+      holdKey,
+      creationFeeHold.holdId,
+    );
 
     let auction: AuctionDocument;
     try {
@@ -150,28 +243,46 @@ export class AuctionService {
         creationFeeTransactionId: null,
         status: AuctionStatus.PENDING,
       });
+      await this.biddingSaga?.markCreationFeeCommitted(
+        holdKey,
+        creationFeeHold.holdId,
+      );
     } catch (error) {
-      if (creationIdempotencyKey && this.isDuplicateKeyError(error)) {
+      const releaseReason =
+        creationIdempotencyKey && this.isDuplicateKeyError(error)
+          ? 'duplicate-release'
+          : 'release';
+      try {
         await this.walletClient.release(
           creationFeeHold.holdId,
-          `auction_creation_fee_${auctionId}:duplicate-release`,
+          `${holdKey}:${releaseReason}`,
         );
+        await this.biddingSaga?.markCreationFeeCompensated(
+          holdKey,
+          creationFeeHold.holdId,
+        );
+      } catch (releaseError) {
+        this.logger.warn(
+          `[CreationFeeSaga] Immediate release failed for ${holdKey}, queued for background compensation: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+        );
+        await this.biddingSaga?.recordCreationFeeHoldId(
+          holdKey,
+          creationFeeHold.holdId,
+        );
+      }
+      if (creationIdempotencyKey && this.isDuplicateKeyError(error)) {
         const existing = await this.auctionRepo.findByIdempotencyKey(
           shipperId,
           creationIdempotencyKey,
         );
         if (existing) return this.returnExistingCreation(existing);
       }
-      await this.walletClient.release(
-        creationFeeHold.holdId,
-        `auction_creation_fee_${auctionId}:release`,
-      );
       throw error;
     }
 
     await this.settleCreationFee(auction);
 
-    const serializedAuction = this.serialize(auction);
+    const serializedAuction = toAuctionResponse(auction);
 
     // Phát sự kiện để báo cho BiddingGateway thực hiện so khớp (matching) xe rỗng
     GlobalEventBus.emit('auction_created', serializedAuction);
@@ -182,14 +293,17 @@ export class AuctionService {
   private async returnExistingCreation(auction: AuctionDocument) {
     if (auction.creationFeeStatus !== CreationFeeStatus.SETTLED) {
       await this.settleCreationFee(auction);
-      const serializedAuction = this.serialize(auction);
+      const serializedAuction = toAuctionResponse(auction);
       GlobalEventBus.emit('auction_created', serializedAuction);
       return serializedAuction;
     }
-    return this.serialize(auction);
+    return toAuctionResponse(auction);
   }
 
   private async settleCreationFee(auction: AuctionDocument) {
+    if (this.biddingSaga) {
+      return this.biddingSaga.settleCreationFee(auction);
+    }
     if (auction.creationFeeStatus === CreationFeeStatus.SETTLED) return;
     if (!auction.creationFeeHoldId) {
       throw new Error('Auction creation fee hold is missing');
@@ -237,7 +351,7 @@ export class AuctionService {
     ]);
 
     return {
-      data: items.map((item) => this.serialize(item)),
+      data: toAuctionResponses(items),
       pagination: {
         page: query.page,
         pageSize: query.pageSize,
@@ -247,43 +361,21 @@ export class AuctionService {
     };
   }
 
-  /**
-   * Đồng bộ trạng thái các phiên đã tới giờ mở (PENDING -> OPEN) hoặc đã hết giờ (OPEN/PENDING -> COMPLETED/CANCELLED_NO_BIDS)
-   * trước khi truy vấn danh sách để bộ lọc status luôn chính xác 100%.
-   */
-  async synchronizeDueAuctions(): Promise<void> {
-    const now = new Date();
-    const dueToOpen = await this.auctionRepo.find(
-      {
-        status: AuctionStatus.PENDING,
-        startTime: { $lte: now },
-        endTime: { $gt: now },
-      },
-      0,
-      50,
-    );
-    for (const auction of dueToOpen) {
-      auction.status = AuctionStatus.OPEN;
-      await auction.save();
-      this.emitStatus(auction);
-    }
-
-    const dueToClose = await this.auctionRepo.find(
-      {
-        status: { $in: [AuctionStatus.PENDING, AuctionStatus.OPEN] },
-        endTime: { $lte: now },
-      },
-      0,
-      50,
-    );
-    for (const auction of dueToClose) {
-      await this.getAndSynchronizeStatus(auction._id);
-    }
-  }
-
   async findById(auctionId: string) {
     const auction = await this.getAndSynchronizeStatus(auctionId);
-    return this.serialize(auction);
+    return toAuctionResponse(auction);
+  }
+
+  async findByIds(auctionIds: string[]) {
+    const uniqueIds = Array.from(
+      new Set(auctionIds.map((id) => id.trim()).filter((id) => id.length > 0)),
+    );
+    if (uniqueIds.length === 0) return [];
+    const docs = await this.auctionRepo.findByIds(uniqueIds);
+    const synchronized = await Promise.all(
+      docs.map((doc) => this.synchronizeAuctionDocument(doc)),
+    );
+    return toAuctionResponses(synchronized);
   }
 
   async update(
@@ -298,7 +390,10 @@ export class AuctionService {
       throw new ConflictException('Only pending auctions can be updated');
     }
 
-    const nextRegistrationStart = auction.registrationStartTime ?? new Date();
+    const nextRegistrationStart =
+      dto.registrationStartTime !== undefined
+        ? dto.registrationStartTime
+        : (auction.registrationStartTime ?? new Date());
     const nextRegistrationEnd =
       dto.registrationEndTime ?? auction.registrationEndTime;
     const nextStart = dto.startTime ?? auction.startTime;
@@ -355,14 +450,20 @@ export class AuctionService {
 
     if (dto.maxPrice !== undefined) {
       const maxPrice = this.parseAmount(dto.maxPrice, 'maxPrice');
+      const creationFee = calculateCreationFee(maxPrice);
+      const currentCreationFeeTier =
+        auction.creationFeeTier ??
+        calculateCreationFee(Number(auction.maxPrice.toString())).tier;
+      if (creationFee.tier !== currentCreationFeeTier) {
+        throw new ConflictException(
+          'Cannot update maxPrice into a different creation fee tier after the creation fee has been charged',
+        );
+      }
+
       const fee = calculateParticipationFee(maxPrice);
       update.maxPrice = maxPrice.toFixed(2);
       update.participationFeeTier = fee.tier;
       update.participationFeeAmount = fee.amount;
-
-      const creationFee = calculateCreationFee(maxPrice);
-      update.creationFeeTier = creationFee.tier;
-      update.creationFeeAmount = creationFee.amount;
 
       if (dto.isDepositRequired === undefined && auction.isDepositRequired) {
         update.depositAmount = auction.depositAmount?.toString() ?? null;
@@ -403,7 +504,7 @@ export class AuctionService {
 
     const updated = await this.auctionRepo.updateById(auctionId, update);
     if (!updated) throw new NotFoundException('Auction not found');
-    return this.serialize(updated);
+    return toAuctionResponse(updated);
   }
 
   async open(auctionId: string, actorId: string, role: string) {
@@ -423,7 +524,7 @@ export class AuctionService {
     auction.status = AuctionStatus.OPEN;
     await auction.save();
     this.emitStatus(auction);
-    return this.serialize(auction);
+    return toAuctionResponse(auction);
   }
 
   async cancel(
@@ -442,8 +543,11 @@ export class AuctionService {
     auction.status = AuctionStatus.CANCELLED;
     auction.cancellationReason = reason?.trim() || null;
     await auction.save();
+    await this.biddingSaga?.releaseCancelledAuctionDeposits(
+      String(auction._id),
+    );
     this.emitStatus(auction);
-    return this.serialize(auction);
+    return toAuctionResponse(auction);
   }
 
   async complete(auctionId: string, actorId: string, role: string) {
@@ -452,7 +556,7 @@ export class AuctionService {
     if (auction.status !== AuctionStatus.OPEN) {
       if (auction.status === AuctionStatus.COMPLETED) {
         await this.ensureAward(auction);
-        return this.serialize(auction);
+        return toAuctionResponse(auction);
       }
       throw new ConflictException('Only open auctions can be completed');
     }
@@ -463,15 +567,15 @@ export class AuctionService {
     const winningBid =
       auction.auctionType === AuctionType.PUBLIC
         ? await this.bidModel
-            .findOne({ auctionId: auction._id })
-            .sort({ bidAmount: 1, bidTime: 1 })
-            .exec()
+          .findOne({ auctionId: auction._id })
+          .sort({ bidAmount: 1, bidTime: 1 })
+          .exec()
         : null;
     auction.winningBidId = winningBid?._id ?? null;
     await auction.save();
     await this.awardService.createForWinner(auction, winningBid);
     this.emitStatus(auction, winningBid?.bidAmount?.toString() ?? null);
-    return this.serialize(auction);
+    return toAuctionResponse(auction);
   }
 
   async selectWinner(
@@ -502,7 +606,7 @@ export class AuctionService {
     await auction.save();
     await this.awardService.createForWinner(auction, winningBid);
     this.emitStatus(auction, winningBid.bidAmount.toString());
-    return this.serialize(auction);
+    return toAuctionResponse(auction);
   }
 
   async retryAward(auctionId: string, actorId: string, role: string) {
@@ -510,14 +614,16 @@ export class AuctionService {
     if (!auction) throw new NotFoundException('Auction not found');
     this.assertOwnerOrAdmin(auction, actorId, role);
     if (auction.status !== AuctionStatus.COMPLETED || !auction.winningBidId) {
-      throw new ConflictException('A completed auction with a selected winner is required');
+      throw new ConflictException(
+        'A completed auction with a selected winner is required',
+      );
     }
     const winningBid = await this.bidModel
       .findOne({ _id: auction.winningBidId, auctionId: auction._id })
       .exec();
     if (!winningBid) throw new NotFoundException('Winning bid not found');
     await this.awardService.createForWinner(auction, winningBid);
-    return this.serialize(auction);
+    return toAuctionResponse(auction);
   }
 
   async approveFallback(auctionId: string, actorId: string, role: string) {
@@ -528,7 +634,7 @@ export class AuctionService {
       auctionId,
       auction.shipperId,
     );
-    return this.serialize(updated);
+    return toAuctionResponse(updated);
   }
 
   /**
@@ -602,7 +708,16 @@ export class AuctionService {
     auction.fraudFlag = true;
     auction.fraudReason = dto.reason.trim();
     await auction.save();
-    return this.serialize(auction);
+    return toAuctionResponse(auction);
+  }
+
+  async unflag(auctionId: string) {
+    const auction = await this.auctionRepo.findById(auctionId);
+    if (!auction) throw new NotFoundException('Auction not found');
+    auction.fraudFlag = false;
+    auction.fraudReason = null;
+    await auction.save();
+    return toAuctionResponse(auction);
   }
 
   private emitStatus(
@@ -630,7 +745,13 @@ export class AuctionService {
   ): Promise<AuctionDocument> {
     const auction = await this.auctionRepo.findById(auctionId);
     if (!auction) throw new NotFoundException('Auction not found');
+    return this.synchronizeAuctionDocument(auction);
+  }
 
+  private async synchronizeAuctionDocument(
+    auction: AuctionDocument,
+  ): Promise<AuctionDocument> {
+    const previousStatus = auction.status;
     const now = new Date();
     let shouldSave = false;
     if (!auction.creationFeeTier || !auction.creationFeeAmount) {
@@ -659,9 +780,9 @@ export class AuctionService {
       const winningBid =
         auction.auctionType === AuctionType.PUBLIC
           ? await this.bidModel
-              .findOne({ auctionId: auction._id })
-              .sort({ bidAmount: 1, bidTime: 1 })
-              .exec()
+            .findOne({ auctionId: auction._id })
+            .sort({ bidAmount: 1, bidTime: 1 })
+            .exec()
           : null;
       auction.winningBidId = winningBid?._id ?? null;
       shouldSave = true;
@@ -673,14 +794,17 @@ export class AuctionService {
       const winningBid =
         auction.auctionType === AuctionType.PUBLIC
           ? await this.bidModel
-              .findOne({ auctionId: auction._id })
-              .sort({ bidAmount: 1, bidTime: 1 })
-              .exec()
+            .findOne({ auctionId: auction._id })
+            .sort({ bidAmount: 1, bidTime: 1 })
+            .exec()
           : null;
       auction.winningBidId = winningBid?._id ?? null;
       shouldSave = true;
     }
     if (shouldSave) await auction.save();
+    if (shouldSave && auction.status !== previousStatus) {
+      this.emitStatus(auction);
+    }
     if (shouldSave && auction.status === AuctionStatus.COMPLETED) {
       await this.ensureAward(auction);
     }
@@ -716,11 +840,13 @@ export class AuctionService {
     endTime: Date,
   ) {
     const now = new Date();
+    const isValidDate = (value: unknown): value is Date =>
+      value instanceof Date && !Number.isNaN(value.getTime());
     if (
-      !(registrationStartTime instanceof Date) ||
-      !(registrationEndTime instanceof Date) ||
-      !(startTime instanceof Date) ||
-      !(endTime instanceof Date)
+      !isValidDate(registrationStartTime) ||
+      !isValidDate(registrationEndTime) ||
+      !isValidDate(startTime) ||
+      !isValidDate(endTime)
     ) {
       throw new BadRequestException('Auction times must be valid dates');
     }
@@ -762,103 +888,5 @@ export class AuctionService {
         'Only the auction owner or an admin can perform this action',
       );
     }
-  }
-
-  private serialize(auction: AuctionDocument) {
-    const now = new Date();
-    return {
-      id: auction._id,
-      shipperId: auction.shipperId,
-      title: auction.title,
-      goodsType: auction.goodsType,
-      weight: auction.weight,
-      volume: auction.volume ?? null,
-      goodsValue: auction.goodsValue?.toString() ?? null,
-      vehicleTypeRequired: auction.vehicleTypeRequired,
-      requiredTemp: auction.requiredTemp ?? null,
-      vehicleSpecs: auction.vehicleSpecs ?? null,
-      requiredVehicleDims: auction.vehicleSpecs
-        ? {
-            length: auction.vehicleSpecs.length,
-            width: auction.vehicleSpecs.width,
-            height: auction.vehicleSpecs.height,
-          }
-        : null,
-      origin: auction.origin,
-      destination: auction.destination,
-      pickupLocation: auction.pickupLocation,
-      deliveryLocation: auction.deliveryLocation,
-      originLocationName: auction.pickupLocation?.locationName ?? null,
-      originAddress: auction.pickupLocation?.address ?? null,
-      originProvince: auction.pickupLocation?.province ?? null,
-      originContactName: auction.pickupLocation?.contactName ?? null,
-      originContactPhone: auction.pickupLocation?.contactPhone ?? null,
-      destinationLocationName: auction.deliveryLocation?.locationName ?? null,
-      destinationAddress: auction.deliveryLocation?.address ?? null,
-      destinationProvince: auction.deliveryLocation?.province ?? null,
-      destinationContactName: auction.deliveryLocation?.contactName ?? null,
-      destinationContactPhone: auction.deliveryLocation?.contactPhone ?? null,
-      earliestPickup: auction.pickupLocation?.earliestTime ?? null,
-      latestPickup: auction.pickupLocation?.latestTime ?? null,
-      earliestDelivery: auction.deliveryLocation?.earliestTime ?? null,
-      latestDelivery: auction.deliveryLocation?.latestTime ?? null,
-      auctionType: auction.auctionType,
-      requireCarrierCoverage: auction.requireCarrierCoverage === true,
-      maxPrice: auction.maxPrice.toString(),
-      priceStep: auction.priceStep ? auction.priceStep.toString() : null,
-      maxBids: auction.maxBids ?? null,
-      images: auction.images,
-      notes: auction.notes,
-      isDepositRequired: auction.isDepositRequired,
-      depositAmount: auction.depositAmount?.toString() ?? null,
-      participationFeeTier: auction.participationFeeTier,
-      participationFeeAmount: auction.participationFeeAmount.toString(),
-      creationFeeTier: auction.creationFeeTier || null,
-      creationFeeAmount: auction.creationFeeAmount
-        ? auction.creationFeeAmount.toString()
-        : null,
-      creationFeeStatus: auction.creationFeeStatus ?? null,
-      registrationStartTime: auction.registrationStartTime ?? null,
-      registrationEndTime: auction.registrationEndTime,
-      startTime: auction.startTime,
-      endTime: auction.endTime,
-      status: auction.status,
-      registrationOpen:
-        auction.status === AuctionStatus.PENDING &&
-        now < auction.registrationEndTime,
-      roomOpen:
-        auction.status === AuctionStatus.OPEN &&
-        now >= auction.startTime &&
-        now < auction.endTime,
-      winningBidId: auction.winningBidId ?? null,
-      awardStatus: auction.awardStatus ?? null,
-      awardTripId: auction.awardTripId ?? null,
-      awardError: auction.awardError ?? null,
-      awardProgress: this.serializeAwardProgress(auction),
-      cancellationReason: auction.cancellationReason ?? null,
-      fraudFlag: auction.fraudFlag ?? false,
-      fraudReason: auction.fraudReason ?? null,
-      createdAt: auction.createdAt,
-      updatedAt: auction.updatedAt,
-    };
-  }
-
-  private serializeAwardProgress(auction: AuctionDocument) {
-    const attempts = auction.awardAttempts ?? [];
-    const current = attempts.find((attempt) =>
-      [
-        'PENDING_SHIPPER_APPROVAL',
-        'CREATING',
-        'CREATION_FAILED',
-        'AWAITING_CARRIER_SIGNATURE',
-        'AWAITING_SHIPPER_SIGNATURE',
-      ].includes(attempt.status),
-    );
-    return {
-      currentAttempt: current?.attemptNumber ?? attempts.length,
-      maximumAttempts: 1 + 3,
-      status: current?.status ?? auction.awardStatus ?? null,
-      signingDeadlineAt: current?.signingDeadlineAt ?? null,
-    };
   }
 }

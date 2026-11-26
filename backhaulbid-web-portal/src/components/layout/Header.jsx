@@ -5,7 +5,9 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { io } from "socket.io-client";
 import { GATEWAY_URL } from "@/config/clientConfig";
-import { apiService, appApiService } from "@/services/apiService";
+import { appApiService } from "@/services/apiService";
+import { notificationApi } from "@/services/notificationApi";
+import { mapNotification } from "@/services/mappers/notificationMapper";
 import { getApiErrorMessage } from "@/services/errorMessage";
 import Box from "@mui/material/Box";
 import IconButton from "@mui/material/IconButton";
@@ -28,6 +30,7 @@ import { homePathByRole } from "@/navigation/navigation";
 import BrandMark from "./BrandMark";
 import { getNotificationDestination } from "@/lib/notificationRouting";
 import { toMediaViewUrl } from "@/lib/mediaUrl";
+import { clearCurrentAccountCache } from "@/hooks/useCurrentAccount";
 
 export default function Header({ userInfo, role = "admin" }) {
   const router = useRouter();
@@ -46,6 +49,8 @@ export default function Header({ userInfo, role = "admin" }) {
     setLoggingOut(true);
     try {
       await appApiService.post("/api/auth/logout");
+      clearCurrentAccountCache();
+      window.google?.accounts?.id?.disableAutoSelect();
       window.localStorage.removeItem("userRole");
       window.localStorage.removeItem("isEkycVerified");
       router.replace("/login");
@@ -62,19 +67,8 @@ export default function Header({ userInfo, role = "admin" }) {
     // The API Gateway injects X-User-Id from the JWT cookie; no client-supplied id is sent.
     const fetchNotifications = async () => {
       try {
-        const data = await apiService.get("/api/v1/notifications/mine", undefined, { skipGlobalNotification: true });
-        const values = Array.isArray(data) ? data : data?.data || [];
-        setNotifications(
-          values.map((notification) => ({
-            notifId: notification.id || notification._id,
-            referenceId: notification.referenceId,
-            type: notification.type,
-            title: notification.title,
-            message: notification.message,
-            time: notification.createdAt,
-            read: Boolean(notification.isRead ?? notification.read),
-          })),
-        );
+        const items = await notificationApi.listMine({ skipGlobalNotification: true });
+        setNotifications(items);
         setLoadError("");
       } catch (error) {
         setLoadError(getApiErrorMessage(error, "Không thể tải thông báo."));
@@ -84,7 +78,7 @@ export default function Header({ userInfo, role = "admin" }) {
 
     const socket = io(GATEWAY_URL, {
       path: "/notification-socket",
-      transports: ["polling", "websocket"],
+      transports: ["websocket"],
       withCredentials: true,
       reconnectionAttempts: 5,
       reconnectionDelay: 2000,
@@ -92,7 +86,8 @@ export default function Header({ userInfo, role = "admin" }) {
 
     // Server joins the room from the gateway-verified identity, not from this payload.
     socket.on("connect", () => socket.emit("identify", {}));
-    socket.on("new_notification", (notif) => {
+    socket.on("new_notification", (rawNotif) => {
+      const notif = mapNotification(rawNotif);
       notify.info(notif?.message || notif?.title || "Bạn có thông báo mới.", { title: "Thông báo mới" });
       fetchNotifications();
     });
@@ -135,8 +130,8 @@ export default function Header({ userInfo, role = "admin" }) {
     if (markingAll) return;
     setMarkingAll(true);
     try {
-      await apiService.post("/api/v1/notifications/mark-all-read", {});
-      setNotifications((previous) => previous.map((item) => ({ ...item, read: true })));
+      await notificationApi.markAllRead();
+      setNotifications((previous) => previous.map((item) => ({ ...item, read: true, isRead: true })));
     } catch (error) {
       notify.error(getApiErrorMessage(error, "Không thể đánh dấu đã đọc."), { title: "Không thể cập nhật thông báo" });
     } finally {

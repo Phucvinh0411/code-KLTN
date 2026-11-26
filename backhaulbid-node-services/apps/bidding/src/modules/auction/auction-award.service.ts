@@ -3,6 +3,7 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
@@ -11,6 +12,7 @@ import { AuctionStatus } from '../../common/enums/auction-status.enum';
 import { DepositStatus } from '../../common/enums/deposit-status.enum';
 import { RegistrationPaymentStatus } from '../../common/enums/registration-payment-status.enum';
 import { CreationFeeStatus } from '../../common/enums/creation-fee-status.enum';
+import { RedisCacheService } from '../../common/redis/redis-cache.service';
 import { WalletClient } from '../../integrations/wallet/wallet.client';
 import {
   UnfreezeLoserItem,
@@ -44,6 +46,7 @@ const AWARD_POLL_INTERVAL_MS = 30_000;
 export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AuctionAwardService.name);
   private pollTimer: NodeJS.Timeout | undefined;
+  private readonly reconcilingAuctionIds = new Set<string>();
 
   constructor(
     @InjectModel(Auction.name)
@@ -57,6 +60,7 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     private readonly walletRmqPublisher: WalletRmqPublisher,
     private readonly notificationClient: AuctionNotificationClient,
     private readonly eventsService: BiddingEventsService,
+    @Optional() private readonly redis?: RedisCacheService,
   ) {}
 
   onModuleInit() {
@@ -186,7 +190,6 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
   async processExpiredNoBidAuctions() {
     const now = new Date();
 
-    // 1. Tự động mở các phiên đã tới giờ bắt đầu
     const dueToOpen = await this.auctionModel
       .find({
         status: AuctionStatus.PENDING,
@@ -213,7 +216,6 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // 2. Tự động xử lý các phiên đã hết giờ
     const expiredAuctions = await this.auctionModel
       .find({
         status: {
@@ -249,7 +251,6 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
           continue;
         }
 
-        // Phiên có lượt đặt giá: chuyển sang COMPLETED và tự động trao thầu nếu là phiên PUBLIC
         if (auction.status !== AuctionStatus.COMPLETED) {
           auction.status = AuctionStatus.COMPLETED;
         }
@@ -288,7 +289,8 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
   private async handleNoBidsScenario(auction: AuctionDocument) {
     auction.status = AuctionStatus.CANCELLED_NO_BIDS;
     auction.awardStatus = 'CANCELLED_NO_BIDS';
-    auction.awardError = 'Phiên đấu giá kết thúc nhưng không có nhà xe nào đặt thầu';
+    auction.awardError =
+      'Phiên đấu giá kết thúc nhưng không có nhà xe nào đặt thầu';
     auction.awardCleanupCompleted = false;
     await auction.save();
 
@@ -318,93 +320,130 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
   }
 
   async processAwardAttempts() {
-    await this.processExpiredNoBidAuctions();
+    const lockKey = 'bidding:award:sweep:lock';
+    const lockToken = randomUUID();
+    const acquired =
+      (await this.redis?.tryAcquireLock(lockKey, lockToken, 25_000)) ?? true;
+    if (!acquired) return;
 
-    const auctions = await this.auctionModel
-      .find({
-        awardAttempts: {
-          $elemMatch: {
-            status: {
-              $in: [
-                AuctionAwardAttemptStatus.CREATING,
-                AuctionAwardAttemptStatus.CREATION_FAILED,
-                AuctionAwardAttemptStatus.AWAITING_CARRIER_SIGNATURE,
-                AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE,
-              ],
+    try {
+      await this.processExpiredNoBidAuctions();
+
+      const auctions = await this.auctionModel
+        .find({
+          awardAttempts: {
+            $elemMatch: {
+              status: {
+                $in: [
+                  AuctionAwardAttemptStatus.CREATING,
+                  AuctionAwardAttemptStatus.CREATION_FAILED,
+                  AuctionAwardAttemptStatus.AWAITING_CARRIER_SIGNATURE,
+                  AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE,
+                ],
+              },
             },
           },
-        },
-      })
-      .limit(100)
-      .exec();
+        })
+        .limit(100)
+        .exec();
 
-    for (const auction of auctions) {
-      try {
-        const index = auction.awardAttempts.findIndex((attempt) =>
-          [
-            AuctionAwardAttemptStatus.CREATING,
-            AuctionAwardAttemptStatus.CREATION_FAILED,
-            AuctionAwardAttemptStatus.AWAITING_CARRIER_SIGNATURE,
-            AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE,
-          ].includes(attempt.status),
-        );
-        if (index < 0) continue;
-        const attempt = auction.awardAttempts[index];
-
-        if (
-          attempt.status === AuctionAwardAttemptStatus.CREATION_FAILED ||
-          attempt.status === AuctionAwardAttemptStatus.CREATING
-        ) {
-          await this.startAttempt(auction, index, true);
-          continue;
-        }
-        if (!attempt.contractId) continue;
-
-        let status = await this.contractAwardClient.status(attempt.attemptId);
-        if (status.status === 'SIGNED') {
-          await this.finishSignedAttempt(auction, attempt);
-          continue;
-        }
-
-        if (status.carrierSigned && !status.shipperSigned) {
-          if (
-            attempt.status !==
-            AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE
-          ) {
-            attempt.status =
-              AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE;
-            attempt.signingDeadlineAt = status.signingDeadlineAt
-              ? new Date(status.signingDeadlineAt)
-              : null;
-            await auction.save();
-            await this.notifyShipperSignatureRequired(auction, attempt);
-          }
-        }
-
-        const deadline = status.signingDeadlineAt
-          ? new Date(status.signingDeadlineAt)
-          : attempt.signingDeadlineAt;
-        if (
-          status.status === 'EXPIRED' ||
-          (deadline && deadline.getTime() <= Date.now())
-        ) {
-          status = await this.contractAwardClient.expire(attempt.attemptId);
-          if (status.status === 'EXPIRED' || status.status === 'CANCELLED') {
-            await this.finishExpiredAttempt(
-              auction,
-              attempt,
-              status.carrierSigned,
-            );
-          }
-        }
-      } catch (error) {
-        this.logger.warn(
-          `Unable to process award ${auction._id}: ${this.errorMessage(error)}`,
-        );
+      for (const auction of auctions) {
+        await this.reconcileAuctionAward(auction);
       }
-    }
 
-    await this.retryTerminalActions();
+      await this.retryTerminalActions();
+    } finally {
+      await this.redis?.releaseLock(lockKey, lockToken);
+    }
+  }
+
+  async handleAwardAttemptEvent(awardAttemptId: string): Promise<void> {
+    const auction = await this.auctionModel
+      .findOne({ 'awardAttempts.attemptId': awardAttemptId })
+      .exec();
+    if (!auction) return;
+    await this.reconcileAuctionAward(auction);
+  }
+
+  async reconcileAuctionAward(auction: AuctionDocument): Promise<void> {
+    const auctionId = String(auction._id);
+    if (this.reconcilingAuctionIds.has(auctionId)) return;
+    this.reconcilingAuctionIds.add(auctionId);
+    const lockKey = `bidding:award:lock:${auctionId}`;
+    const lockToken = randomUUID();
+    let redisLockAcquired = false;
+
+    try {
+      redisLockAcquired =
+        (await this.redis?.tryAcquireLock(lockKey, lockToken, 20_000)) ?? true;
+      if (!redisLockAcquired) return;
+
+      const index = auction.awardAttempts.findIndex((attempt) =>
+        [
+          AuctionAwardAttemptStatus.CREATING,
+          AuctionAwardAttemptStatus.CREATION_FAILED,
+          AuctionAwardAttemptStatus.AWAITING_CARRIER_SIGNATURE,
+          AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE,
+        ].includes(attempt.status),
+      );
+      if (index < 0) return;
+      const attempt = auction.awardAttempts[index];
+
+      if (
+        attempt.status === AuctionAwardAttemptStatus.CREATION_FAILED ||
+        attempt.status === AuctionAwardAttemptStatus.CREATING
+      ) {
+        await this.startAttempt(auction, index, true);
+        return;
+      }
+      if (!attempt.contractId) return;
+
+      let status = await this.contractAwardClient.status(attempt.attemptId);
+      if (status.status === 'SIGNED') {
+        await this.finishSignedAttempt(auction, attempt);
+        return;
+      }
+
+      if (status.carrierSigned && !status.shipperSigned) {
+        if (
+          attempt.status !==
+          AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE
+        ) {
+          attempt.status = AuctionAwardAttemptStatus.AWAITING_SHIPPER_SIGNATURE;
+          attempt.signingDeadlineAt = status.signingDeadlineAt
+            ? new Date(status.signingDeadlineAt)
+            : null;
+          await auction.save();
+          await this.notifyShipperSignatureRequired(auction, attempt);
+        }
+      }
+
+      const deadline = status.signingDeadlineAt
+        ? new Date(status.signingDeadlineAt)
+        : attempt.signingDeadlineAt;
+      if (
+        status.status === 'EXPIRED' ||
+        (deadline && deadline.getTime() <= Date.now())
+      ) {
+        status = await this.contractAwardClient.expire(attempt.attemptId);
+        if (status.status === 'EXPIRED' || status.status === 'CANCELLED') {
+          await this.finishExpiredAttempt(
+            auction,
+            attempt,
+            status.carrierSigned,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Unable to process award ${auction._id}: ${this.errorMessage(error)}`,
+      );
+    } finally {
+      if (redisLockAcquired) {
+        await this.redis?.releaseLock(lockKey, lockToken);
+      }
+      this.reconcilingAuctionIds.delete(auctionId);
+    }
   }
 
   private async retryTerminalActions() {
@@ -681,7 +720,10 @@ export class AuctionAwardService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private notifyNoCarrierSigned(auction: AuctionDocument, feeRefunded: boolean) {
+  private notifyNoCarrierSigned(
+    auction: AuctionDocument,
+    feeRefunded: boolean,
+  ) {
     return this.notificationClient.notify({
       userId: auction.shipperId,
       title: feeRefunded

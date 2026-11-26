@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import {
   Box,
   Button,
   CardContent,
   Chip,
-  CircularProgress,
   Divider,
   Grid,
   IconButton,
@@ -33,15 +33,19 @@ import AccountBalanceWalletIcon from "@mui/icons-material/AccountBalanceWallet";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import Link from "next/link";
 import { PageHeader, StatCard } from "@/components/common";
+import { ListSkeleton } from "@/components/ui";
 import ActionInbox from "@/components/dashboard/ActionInbox";
-import EmptyRouteDialog from "@/components/carrier/EmptyRouteDialog";
 import { useGlobalNotification } from "@/components/common/NotificationPopup";
 import AppCard from "@/components/common/AppCard";
 import { getMyVehicles } from "@/services/fleetApi";
 import { contractApi } from "@/services/contractApi";
 import { listAuctions, listMyRegistrations } from "@/services/biddingApi";
 import { tokens } from "@/theme/theme";
+import { shortId } from "@/lib/format";
 import { unwrapListData } from "@/services/responseData";
+import useAccountVerification from "@/hooks/useAccountVerification";
+
+const EmptyRouteDialog = dynamic(() => import("@/components/carrier/EmptyRouteDialog"), { ssr: false });
 
 const ACTIVE_TRIP_STATUSES = new Set(["WAITING_PICKUP", "PICKED_UP", "IN_TRANSIT"]);
 const TRIP_PROGRESS = {
@@ -96,6 +100,7 @@ const mapTrip = (trip) => ({
 
 const mapAuction = (auction) => ({
   id: auction.id,
+  title: auction.title || "",
   route: `${auction.originLocationName || auction.origin || "Chưa cập nhật"} - ${auction.destinationLocationName || auction.destination || "Chưa cập nhật"}`,
   price: Number(auction.maxPrice) || 0,
   endTime: auction.endTime,
@@ -163,6 +168,8 @@ const buildChartData = (trips, filter) => {
 
 export default function CarrierDashboard() {
   const notify = useGlobalNotification();
+  const verification = useAccountVerification(true);
+  const verificationLocked = !verification.loading && !verification.fullyVerified;
   const [timeFilter, setTimeFilter] = useState("month");
   const [auctionPage, setAuctionPage] = useState(1);
   const [dashboard, setDashboard] = useState({ vehicles: [], trips: [], auctions: [], registrations: [], wallet: null });
@@ -177,22 +184,18 @@ export default function CarrierDashboard() {
       return fallback;
     });
 
-    let vehicleData = [];
-    getMyVehicles()
-      .then((v) => { vehicleData = v; })
-      .catch((err) => {
+    Promise.all([
+      getMyVehicles().catch((err) => {
         console.error("Failed to load carrier vehicles:", err);
         if (active) notify.warning("Không thể tải danh sách xe. Vui lòng thử lại.");
-      })
-      .then(() =>
-        Promise.all([
-          safeFetch(contractApi.listTrips()),
-          safeFetch(listAuctions({ status: "OPEN", page: 1, pageSize: 100 })),
-          safeFetch(listAuctions({ status: "PENDING", page: 1, pageSize: 100 })),
-          safeFetch(listMyRegistrations({ page: 1, pageSize: 100 })),
-        ])
-      )
-      .then(([trips, openAuctions, pendingAuctions, registrations]) => {
+        return [];
+      }),
+      safeFetch(contractApi.listTrips()),
+      safeFetch(listAuctions({ status: "OPEN", page: 1, pageSize: 100 })),
+      safeFetch(listAuctions({ status: "PENDING", page: 1, pageSize: 100 })),
+      safeFetch(listMyRegistrations({ page: 1, pageSize: 100 })),
+    ])
+      .then(([vehicleData, trips, openAuctions, pendingAuctions, registrations]) => {
         if (!active) return;
         const auctionItems = [
           ...unwrapListData(openAuctions),
@@ -237,11 +240,7 @@ export default function CarrierDashboard() {
   };
 
   if (loading) {
-    return (
-      <Box className="flex min-h-[320px] items-center justify-center gap-2 text-ink-muted">
-        <CircularProgress size={24} /> Đang tải trung tâm điều hành...
-      </Box>
-    );
+    return <ListSkeleton rows={4} height={120} label="Đang tải tổng quan..." />;
   }
 
   return (
@@ -256,27 +255,33 @@ export default function CarrierDashboard() {
               href="/carrier/empty-routes"
               variant="outlined"
               color="inherit"
-              sx={{ bgcolor: "background.paper", borderRadius: "10px", textTransform: "none", fontWeight: 600 }}
+              sx={{ bgcolor: "background.paper" }}
             >
-              Lịch sử xe rỗng
+              Tuyến xe rỗng
             </Button>
-            <Button 
-              variant="contained" 
-              startIcon={<LocalShippingIcon />}
-              onClick={() => setEmptyRouteOpen(true)}
-              sx={{ borderRadius: "10px", textTransform: "none", fontWeight: 700 }}
-            >
-              Khai báo xe rỗng
-            </Button>
+            <MuiTooltip title={verificationLocked ? "Hoàn tất xác thực eKYC và doanh nghiệp để khai báo xe rỗng" : ""}>
+              <span>
+                <Button
+                  variant="contained"
+                  startIcon={<LocalShippingIcon />}
+                  disabled={verificationLocked}
+                  onClick={() => !verificationLocked && setEmptyRouteOpen(true)}
+                >
+                  Khai báo xe rỗng
+                </Button>
+              </span>
+            </MuiTooltip>
           </Stack>
         }
       />
       <ActionInbox role="carrier" />
-      <EmptyRouteDialog 
-        open={emptyRouteOpen} 
-        onClose={() => setEmptyRouteOpen(false)} 
-        vehicles={dashboard.vehicles} 
-      />
+      {emptyRouteOpen && (
+        <EmptyRouteDialog 
+          open={emptyRouteOpen} 
+          onClose={() => setEmptyRouteOpen(false)} 
+          vehicles={dashboard.vehicles} 
+        />
+      )}
       <Grid container spacing={3}>
         <Grid item xs={12} sm={6} md={3}>
           <StatCard title="Xe đã xác minh" value={`${verifiedVehicles} / ${dashboard.vehicles.length}`} subtitle="Hồ sơ đạt duyệt" icon={LocalShippingIcon} color="var(--color-brand)" />
@@ -295,7 +300,7 @@ export default function CarrierDashboard() {
       <Grid container spacing={4}>
         <Grid item xs={12} md={8}>
           <Box className="flex flex-col gap-6">
-            <AppCard showAccent={false} className="glass overflow-hidden rounded-xl border-white/50 shadow-sm relative">
+            <AppCard showAccent={false} className="overflow-hidden relative">
               <CardContent className="p-6">
                 <Box className="flex flex-col sm:flex-row sm:items-center justify-between mb-6 gap-3">
                   <Box>
@@ -319,7 +324,15 @@ export default function CarrierDashboard() {
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={tokens.line} />
                       <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: tokens.inkSubtle, fontSize: 12, fontWeight: 600 }} dy={10} />
-                      <YAxis axisLine={false} tickLine={false} tick={{ fill: tokens.inkSubtle, fontSize: 12, fontWeight: 600 }} tickFormatter={formatShortCurrency} dx={-5} />
+                      <YAxis
+                        axisLine={false}
+                        tickLine={false}
+                        allowDecimals={false}
+                        domain={[0, (dataMax) => Math.max(Number(dataMax) || 0, 1_000_000)]}
+                        tick={{ fill: tokens.inkSubtle, fontSize: 12, fontWeight: 600 }}
+                        tickFormatter={formatShortCurrency}
+                        dx={-5}
+                      />
                       <RechartsTooltip formatter={(value) => [formatCurrency(value), "Giá trị chuyến"]} contentStyle={{ borderRadius: "12px", border: "1px solid var(--color-line)", boxShadow: "0 8px 30px rgba(27,73,101,0.1)" }} />
                       <Area type="monotone" dataKey="revenue" stroke={tokens.brand} strokeWidth={3} fillOpacity={1} fill="url(#colorRevenue)" />
                     </AreaChart>
@@ -328,7 +341,7 @@ export default function CarrierDashboard() {
               </CardContent>
             </AppCard>
 
-            <AppCard showAccent={false} className="glass overflow-hidden rounded-xl border-white/50 shadow-sm relative">
+            <AppCard showAccent={false} className="overflow-hidden relative">
               <CardContent className="p-6">
                 <Box className="flex items-center justify-between mb-4">
                   <Typography variant="h6" className="font-bold text-[var(--color-brand)]">Chuyến xe đang chạy</Typography>
@@ -339,7 +352,7 @@ export default function CarrierDashboard() {
                 ) : (
                   <Box className="flex flex-col gap-3">
                     {activeTrips.slice(0, 4).map((trip) => (
-                      <Box key={trip.backendId} className="p-4 rounded-xl border border-line bg-white/60 hover:bg-white transition-all duration-300 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-[0_2px_10px_rgba(0,0,0,0.02)]">
+                      <Box key={trip.backendId} className="p-4 rounded-xl border border-line bg-white hover:bg-surface-sunken/40 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4">
                         <Box className="flex items-center gap-4">
                           <Box className="w-10 h-10 rounded-full bg-success-soft flex items-center justify-center text-success"><LocalShippingIcon fontSize="small" /></Box>
                           <Box>
@@ -350,7 +363,7 @@ export default function CarrierDashboard() {
                         <Box className="flex items-center gap-4 w-full md:w-[45%]">
                           <Box className="w-full flex flex-col gap-1">
                             <Box className="flex justify-between items-center">
-                              <Typography variant="caption" className="text-ink-muted font-bold uppercase tracking-wider">{trip.statusLabel}</Typography>
+                              <Typography variant="caption" className="text-xs font-medium text-ink-muted">{trip.statusLabel}</Typography>
                               <Typography variant="caption" className="text-success font-bold">{trip.progress}%</Typography>
                             </Box>
                             <Box className="w-full h-2 bg-surface-sunken rounded-full overflow-hidden"><Box className="h-full bg-success rounded-full" style={{ width: `${trip.progress}%` }} /></Box>
@@ -367,7 +380,7 @@ export default function CarrierDashboard() {
         </Grid>
 
         <Grid item xs={12} md={4}>
-          <AppCard showAccent={false} className="glass overflow-hidden rounded-xl border-white/50 shadow-sm h-full relative">
+          <AppCard showAccent={false} className="overflow-hidden h-full relative">
             <CardContent className="p-6 flex flex-col h-full">
               <Box className="flex items-center justify-between mb-6">
                 <Typography variant="h6" className="font-bold text-[var(--color-brand)]">Phiên đang mở</Typography>
@@ -377,13 +390,13 @@ export default function CarrierDashboard() {
                 {currentAuctions.length === 0 ? (
                   <Box className="rounded-xl border border-dashed border-line-strong p-8 text-center text-ink-muted">Hiện chưa có phiên đấu giá phù hợp.</Box>
                 ) : currentAuctions.map((auction) => (
-                  <Box key={auction.id} className="p-4 rounded-xl border border-line bg-white/80 shadow-sm hover:shadow-md transition-all duration-300 group relative overflow-hidden">
+                  <Box key={auction.id} className="p-4 rounded-xl border border-line bg-white hover:border-line-strong transition-colors group relative overflow-hidden">
                     {(() => {
                       const timeInfo = formatRemaining(auction.endTime);
                       return (
                         <Box className="flex justify-between items-start gap-2 mb-2 relative z-10">
-                          <Typography variant="subtitle2" className="font-bold text-[var(--color-brand)] truncate max-w-[150px]">
-                            {String(auction.id).slice(0, 12)}
+                          <Typography variant="subtitle2" className="font-bold text-[var(--color-brand)] truncate max-w-[175px]">
+                            #{shortId(auction.id)}{auction.title ? ` · ${auction.title}` : ""}
                           </Typography>
                           <Typography
                             variant="caption"
@@ -401,15 +414,15 @@ export default function CarrierDashboard() {
                     <Typography variant="body2" className="text-ink-muted mb-3 relative z-10 font-medium">{auction.route}</Typography>
                     <Divider className="my-3 opacity-60" />
                     <Box className="flex justify-between items-center relative z-10">
-                      <Box><Typography variant="caption" className="text-ink-subtle block uppercase tracking-widest font-bold text-[0.6rem]">Giá tối đa</Typography><Typography variant="body1" className="font-extrabold text-ink">{formatCurrency(auction.price)}</Typography></Box>
-                      <Button component={Link} href={`/carrier/auctions/${auction.id}`} variant="contained" size="small" sx={{ bgcolor: "var(--color-brand)", borderRadius: "8px", "&:hover": { bgcolor: "var(--color-ink)" }, px: 2, py: 1 }}>Xem phiên</Button>
+                      <Box><Typography variant="caption" className="text-xs font-medium text-ink-muted block">Giá tối đa</Typography><Typography variant="body1" className="font-bold text-ink tabular">{formatCurrency(auction.price)}</Typography></Box>
+                      <Button component={Link} href={`/carrier/auctions/${auction.id}`} variant="contained" size="small">Xem phiên</Button>
                     </Box>
                   </Box>
                 ))}
               </Box>
               {dashboard.auctions.length > 0 && <Box className="flex justify-center mt-4"><Pagination count={totalPages} page={auctionPage} onChange={(event, value) => setAuctionPage(value)} size="small" color="primary" /></Box>}
-              <Button component={Link} href="/carrier/auctions" variant="outlined" fullWidth sx={{ mt: 4, borderRadius: "8px", color: "var(--color-brand)", borderColor: "var(--color-brand)", "&:hover": { borderColor: "var(--color-ink)", bgcolor: "rgba(27,73,101,0.04)" }, py: 1 }}>Khám phá thêm</Button>
-              <Button component={Link} href="/carrier/statistics" variant="text" fullWidth sx={{ mt: 1, color: "var(--color-brand)", fontWeight: 700 }}>Xem thống kê</Button>
+              <Button component={Link} href="/carrier/auctions" variant="outlined" fullWidth sx={{ mt: 4 }}>Khám phá thêm</Button>
+              <Button component={Link} href="/carrier/statistics" variant="text" fullWidth sx={{ mt: 1 }}>Xem thống kê</Button>
             </CardContent>
           </AppCard>
         </Grid>

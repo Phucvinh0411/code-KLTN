@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import Box from "@mui/material/Box";
 import Divider from "@mui/material/Divider";
 import TextField from "@mui/material/TextField";
@@ -13,7 +13,6 @@ import SaveIcon from "@mui/icons-material/Save";
 import CircleIcon from "@mui/icons-material/Circle";
 import DnsOutlinedIcon from "@mui/icons-material/DnsOutlined";
 import ShieldOutlinedIcon from "@mui/icons-material/ShieldOutlined";
-import LinearProgress from "@mui/material/LinearProgress";
 import { getAdminSettings, getGatewayHealth, saveAdminSettings } from "@/services/adminSettingsApi";
 
 import {
@@ -55,6 +54,11 @@ export default function AdminSettingsPage() {
   const [maintenance, setMaintenance] = useState(false);
   const [settings, setSettings] = useState({});
   const [serverHealth, setServerHealth] = useState(null);
+  const isHttps = useSyncExternalStore(
+    () => () => {},
+    () => window.location.protocol === "https:",
+    () => null,
+  );
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -177,44 +181,16 @@ export default function AdminSettingsPage() {
                   </Box>
                 </Box>
 
-                {/* CPU usage */}
-                <Box>
-                  <Box sx={{ display: "flex", justifyContent: "space-between", mb: 1 }}>
-                    <Typography variant="body2" sx={{ fontWeight: 700, color: "text.primary" }}>
-                      Hiệu năng CPU
-                    </Typography>
-                    <Typography variant="body2" sx={{ fontWeight: 700, color: "primary.main" }}>
-                      Not available
-                    </Typography>
-                  </Box>
-                  <LinearProgress variant="determinate" value={0} sx={{ height: 6, borderRadius: 3, bgcolor: "rgba(0,0,0,0.04)" }} />
-                </Box>
-
-                {/* RAM usage */}
-                <Box>
-                  <Box sx={{ display: "flex", justifyContent: "space-between", mb: 1 }}>
-                    <Typography variant="body2" sx={{ fontWeight: 700, color: "text.primary" }}>
-                      Bộ nhớ RAM
-                    </Typography>
-                    <Typography variant="body2" sx={{ fontWeight: 700, color: "primary.main" }}>
-                      Not available
-                    </Typography>
-                  </Box>
-                  <LinearProgress variant="determinate" value={0} sx={{ height: 6, borderRadius: 3, bgcolor: "rgba(0,0,0,0.04)" }} />
-                </Box>
-
-                <Divider />
-
-                {/* Details list */}
+                {/* Service probe status */}
                 <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
                   <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
                     <DnsOutlinedIcon sx={{ color: "text.secondary", fontSize: 20 }} />
                     <Box sx={{ flex: 1 }}>
                       <Typography variant="caption" sx={{ color: "text.secondary", display: "block" }}>
-                        Database Connection
+                        Cơ sở dữ liệu &amp; Probes
                       </Typography>
                       <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                        {serverHealth === null ? "Đang kiểm tra..." : serverHealth ? "Đã kết nối" : "Không kết nối"}
+                        {serverHealth === null ? "Đang kiểm tra..." : serverHealth ? "Liveness / Readiness: Đang hoạt động" : "Không kết nối"}
                       </Typography>
                     </Box>
                   </Box>
@@ -223,10 +199,14 @@ export default function AdminSettingsPage() {
                     <ShieldOutlinedIcon sx={{ color: "text.secondary", fontSize: 20 }} />
                     <Box sx={{ flex: 1 }}>
                       <Typography variant="caption" sx={{ color: "text.secondary", display: "block" }}>
-                        Chứng chỉ SSL
+                        Chứng chỉ SSL / Giao thức
                       </Typography>
                       <Typography variant="body2" sx={{ fontWeight: 600, color: "success.main" }}>
-                        Not available
+                        {isHttps === null
+                          ? "Đang kiểm tra..."
+                          : isHttps
+                            ? "HTTPS / TLS đang kích hoạt"
+                            : "HTTP nội bộ"}
                       </Typography>
                     </Box>
                   </Box>

@@ -6,9 +6,9 @@ import StepLabel from "@mui/material/StepLabel";
 import CheckCircleIcon from "@mui/icons-material/CheckCircleOutlined";
 
 const STEPS = [
-  { label: "Thông tin hàng hóa & Xe", desc: "Loại hàng, quy cách, kích thước xe" },
+  { label: "Thông tin hàng hóa & xe", desc: "Loại hàng, quy cách, kích thước xe" },
   { label: "Tuyến đường A → B", desc: "Địa chỉ nhận/giao & thời gian" },
-  { label: "Cấu hình Đấu giá", desc: "Chế độ, giá trần & tiền cọc" },
+  { label: "Cấu hình đấu giá", desc: "Chế độ, giá trần & tiền cọc" },
 ];
 
 export default function StepNavigationHeader({ activeStep, setActiveStep }) {
@@ -17,12 +17,38 @@ export default function StepNavigationHeader({ activeStep, setActiveStep }) {
       {/* Progress bar line */}
       <div className="w-full bg-surface-sunken h-1.5 rounded-full mb-5 overflow-hidden">
         <div
-          className="bg-[var(--color-brand)] h-full transition-all duration-500 ease-out"
-          style={{ width: `${((activeStep + 1) / STEPS.length) * 100}%` }}
+          className="bg-[var(--color-brand)] h-full"
+          style={{
+            width: "100%",
+            transformOrigin: "left center",
+            transform: `scaleX(${(activeStep + 1) / STEPS.length})`,
+            transition: "transform 300ms ease-out",
+          }}
         />
       </div>
 
-      <Stepper activeStep={activeStep} connector={<div className="hidden" />} className="w-full flex justify-between gap-4 overflow-x-auto pb-2">
+      <Stepper
+        activeStep={activeStep}
+        connector={<div className="hidden" />}
+        sx={{
+          width: "100%",
+          display: "grid",
+          gridTemplateColumns: { xs: "repeat(3, minmax(0, 1fr))", sm: "repeat(3, auto)" },
+          justifyContent: { sm: "space-between" },
+          alignItems: "start",
+          gap: { xs: 1, sm: 2 },
+          pb: 0.5,
+          "& .MuiStep-root": { p: 0, minWidth: 0 },
+          "& .MuiStepLabel-root": {
+            flexDirection: { xs: "column", sm: "row" },
+            alignItems: "center",
+            textAlign: { xs: "center", sm: "left" },
+            gap: { xs: 0.75, sm: 1 },
+          },
+          "& .MuiStepLabel-iconContainer": { p: 0 },
+          "& .MuiStepLabel-label": { width: "100%" },
+        }}
+      >
         {STEPS.map((step, idx) => {
           const isCompleted = idx < activeStep;
           const isActive = idx === activeStep;
@@ -32,7 +58,7 @@ export default function StepNavigationHeader({ activeStep, setActiveStep }) {
               <StepLabel
                 StepIconComponent={() => (
                   <div
-                    className={`w-9 h-9 rounded-xl flex items-center justify-center font-extrabold text-xs cursor-pointer transition-all shadow-xs ${
+                    className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs cursor-pointer transition-colors shadow-xs ${
                       isCompleted
                         ? "bg-success text-white shadow-success-soft"
                         : isActive
@@ -46,11 +72,11 @@ export default function StepNavigationHeader({ activeStep, setActiveStep }) {
               >
                 <div className="cursor-pointer select-none">
                   <p
-                    className={`font-extrabold text-xs md:text-sm leading-tight whitespace-nowrap ${
+                    className={`font-bold text-[0.72rem] md:text-sm leading-tight whitespace-normal sm:whitespace-nowrap break-words ${
                       isActive
                         ? "text-[var(--color-brand)]"
                         : isCompleted
-                        ? "text-success font-bold"
+                        ? "text-success"
                         : "text-ink-subtle"
                     }`}
                   >

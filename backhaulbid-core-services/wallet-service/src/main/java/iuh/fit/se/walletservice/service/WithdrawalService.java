@@ -59,7 +59,7 @@ public class WithdrawalService {
 
         Transaction hold = wallet.freeze(withdrawal.getAmount());
         hold.setReferenceCode("WITHDRAWAL_HOLD:" + withdrawal.getId());
-        hold.setDescription("Hold for withdrawal request " + withdrawal.getId());
+        hold.setDescription("Tạm giữ cho yêu cầu rút tiền #" + shortId(withdrawal.getId()));
         walletRepository.saveAndFlush(wallet);
         return withdrawalMapper.toResponse(withdrawal);
     }
@@ -71,22 +71,24 @@ public class WithdrawalService {
 
     @Transactional(readOnly = true)
     public WithdrawalPageResponse pending(String status, int page, int pageSize) {
-        WithdrawalStatus filter = status == null || status.isBlank()
-                ? WithdrawalStatus.PENDING
-                : parseStatus(status);
-        return page(withdrawalRepository.findByStatus(filter, pageable(page, pageSize)), page, pageSize);
+        if (status == null || status.isBlank() || "ALL".equalsIgnoreCase(status.trim())) {
+            return page(withdrawalRepository.findAll(pageable(page, pageSize)), page, pageSize);
+        }
+        return page(withdrawalRepository.findByStatus(parseStatus(status), pageable(page, pageSize)), page, pageSize);
     }
 
     @Transactional
     public WithdrawalResponse approve(UUID withdrawalId, UUID adminId) {
         WithdrawalRequest withdrawal = pendingRequest(withdrawalId);
-        Wallet wallet = wallet(withdrawal.getAccountId());
+        Wallet wallet = walletForUpdate(withdrawal.getAccountId());
 
-        wallet.unfreeze(withdrawal.getAmount());
+        Transaction release = wallet.unfreeze(withdrawal.getAmount());
+        release.setReferenceCode("WITHDRAWAL_RELEASE:" + withdrawal.getId());
+        release.setDescription("Giải phóng tạm giữ chi trả yêu cầu rút tiền #" + shortId(withdrawal.getId()));
         Transaction payout = wallet.withdraw(withdrawal.getAmount());
         payout.setType(TransactionType.WITHDRAW);
         payout.setReferenceCode("WITHDRAWAL:" + withdrawal.getId());
-        payout.setDescription("Approved manual withdrawal " + withdrawal.getId());
+        payout.setDescription("Chi trả yêu cầu rút tiền #" + shortId(withdrawal.getId()));
         walletRepository.saveAndFlush(wallet);
 
         withdrawal.setStatus(WithdrawalStatus.APPROVED);
@@ -98,8 +100,10 @@ public class WithdrawalService {
     @Transactional
     public WithdrawalResponse reject(UUID withdrawalId, UUID adminId, WithdrawalDecisionRequest decision) {
         WithdrawalRequest withdrawal = pendingRequest(withdrawalId);
-        Wallet wallet = wallet(withdrawal.getAccountId());
-        wallet.unfreeze(withdrawal.getAmount());
+        Wallet wallet = walletForUpdate(withdrawal.getAccountId());
+        Transaction release = wallet.unfreeze(withdrawal.getAmount());
+        release.setReferenceCode("WITHDRAWAL_RELEASE:" + withdrawal.getId());
+        release.setDescription("Hoàn tiền do từ chối yêu cầu rút #" + shortId(withdrawal.getId()));
         walletRepository.saveAndFlush(wallet);
 
         withdrawal.setStatus(WithdrawalStatus.REJECTED);
@@ -120,8 +124,8 @@ public class WithdrawalService {
         return withdrawal;
     }
 
-    private Wallet wallet(UUID accountId) {
-        return walletRepository.findByAccountId(accountId)
+    private Wallet walletForUpdate(UUID accountId) {
+        return walletRepository.findByAccountIdForUpdate(accountId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Wallet not found"));
     }
 
@@ -143,10 +147,14 @@ public class WithdrawalService {
 
     private WithdrawalStatus parseStatus(String status) {
         try {
-            return WithdrawalStatus.valueOf(status.toUpperCase());
+            return WithdrawalStatus.valueOf(status.trim().toUpperCase());
         } catch (IllegalArgumentException exception) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid withdrawal status");
         }
+    }
+
+    private static String shortId(UUID id) {
+        return id == null ? "" : id.toString().substring(0, 8).toUpperCase();
     }
 
     private static void validateWholeAmount(BigDecimal amount) {

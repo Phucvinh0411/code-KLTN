@@ -20,6 +20,7 @@ import StarOutlineIcon from "@mui/icons-material/StarOutline";
 import CarrierReviewsCard from "@/components/shipper/carrier-detail/CarrierReviewsCard";
 import { getReviewHeadline } from "@/components/shipper/carrier-detail/carrierReviewPresentation";
 import { carrierProfileApi } from "@/services/carrierProfileApi";
+import { VEHICLE_TYPE_LABELS } from "@/services/fleetApi";
 import { mapCarrierReviews } from "@/services/carrierProfileMapper";
 import { getApiErrorMessage } from "@/services/errorMessage";
 
@@ -53,7 +54,7 @@ function Metric({ label, value, icon: Icon }) {
         <Typography sx={{ color: "text.secondary", fontSize: 13 }}>{label}</Typography>
         <Icon sx={{ color: "primary.main", fontSize: 20, flexShrink: 0 }} />
       </Box>
-      <Typography className="tabular" sx={{ mt: 1, fontSize: 24, fontWeight: 750 }}>{value}</Typography>
+      <Typography className="tabular" sx={{ mt: 1, fontSize: 24, fontWeight: 700 }}>{value}</Typography>
     </AppCard>
   );
 }
@@ -125,7 +126,11 @@ export default function CarrierCapabilityPanel({ accountId }) {
   const { statistics, vehicles, drivers, reviewSummary, reviews } = result.data;
   const vehicleColumns = [
     { key: "licensePlate", label: "Biển số" },
-    { key: "vehicleType", label: "Loại xe" },
+    {
+      key: "vehicleType",
+      label: "Loại xe",
+      render: (vehicle) => VEHICLE_TYPE_LABELS[vehicle.vehicleType] || vehicle.vehicleType || "Chưa cập nhật",
+    },
     { key: "bodyType", label: "Thân xe" },
     { key: "payloadCapacity", label: "Tải trọng", render: (vehicle) => vehicle.payloadCapacity == null ? "Chưa cập nhật" : `${vehicle.payloadCapacity} tấn` },
     { key: "status", label: "Trạng thái", render: (vehicle) => VEHICLE_STATUS[vehicle.status] || vehicle.status || "Chưa cập nhật" },

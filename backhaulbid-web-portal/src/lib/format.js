@@ -96,4 +96,58 @@ export function formatWeight(value) {
   return amount && amount > 0 ? `${numberFormatter.format(amount)} tấn` : UNKNOWN;
 }
 
+/** Compact chart tick for VND values so Y-axis labels stay readable in narrow gutters. */
+export function formatCurrencyAxisTick(value) {
+  const amount = Number(value) || 0;
+  if (amount === 0) return "0 đ";
+  if (Math.abs(amount) >= 1_000_000) {
+    return `${(amount / 1_000_000).toFixed(1).replace(/\.0$/, "")}tr`;
+  }
+  return `${Math.round(amount / 1000)}k`;
+}
+
+/** Removes consecutive duplicate comma-separated location segments (e.g. "Bình Dương, Bình Dương"). */
+export function formatAddress(value, fallback = UNKNOWN) {
+  const raw = String(value || "").trim();
+  if (!raw) return fallback;
+  const parts = raw.split(",").map((part) => part.trim()).filter(Boolean);
+  const deduped = [];
+  for (const part of parts) {
+    const prev = deduped.at(-1);
+    if (!prev || prev.toLocaleLowerCase("vi") !== part.toLocaleLowerCase("vi")) {
+      deduped.push(part);
+    }
+  }
+  return deduped.join(", ") || fallback;
+}
+
+const PREFIXED_UUID_REGEX = /^#?([a-z0-9]+)-([0-9a-f]{8})-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RAW_UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Shortens UUID-backed contract codes like AUC-<uuid> for readable UI labels without altering custom codes. */
+export function formatContractCode(code, fallback = "Chưa có mã hợp đồng") {
+  const raw = String(code ?? "").trim();
+  if (!raw) return fallback;
+  const prefixed = raw.match(PREFIXED_UUID_REGEX);
+  if (prefixed) {
+    return `#${prefixed[1].toUpperCase()}-${prefixed[2].toUpperCase()}`;
+  }
+  if (RAW_UUID_REGEX.test(raw)) {
+    return `#${shortId(raw)}`;
+  }
+  return raw;
+}
+
+/** Vietnamese accessibility labels for MUI TablePagination navigation buttons. */
+export function getPaginationItemAriaLabel(type) {
+  return (
+    {
+      first: "Trang đầu",
+      last: "Trang cuối",
+      next: "Trang tiếp theo",
+      previous: "Trang trước",
+    }[type] || ""
+  );
+}
+
 export { UNKNOWN };

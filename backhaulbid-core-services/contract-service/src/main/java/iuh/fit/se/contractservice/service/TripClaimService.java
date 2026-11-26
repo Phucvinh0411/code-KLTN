@@ -37,7 +37,11 @@ public class TripClaimService {
         }
         Trip trip = tripRepository.findByIdForUpdate(tripId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Trip not found"));
-        if (accountId.equals(trip.getDriverAccountId())) return trip; // Safe retry after a lost response.
+        if (accountId.equals(trip.getDriverAccountId())) {
+            trip.getTrackingLogs().size();
+            if (trip.getContract() != null) trip.getContract().getStatus();
+            return trip; // Safe retry after a lost response.
+        }
         if (trip.getDriverAccountId() != null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Trip has already been claimed");
         }
@@ -64,6 +68,8 @@ public class TripClaimService {
         journeyEventRepository.save(JourneyEvent.builder().trip(trip).actorId(accountId)
                 .eventType(JourneyEventType.DRIVER_ACCEPTED).status(trip.getStatus())
                 .note("Tài xế nhận chuyến bằng PIN phân công").build());
+        trip.getTrackingLogs().size();
+        if (trip.getContract() != null) trip.getContract().getStatus();
         return trip;
     }
 

@@ -36,7 +36,15 @@ public class InternalMediaController {
     private static final Pattern PRIVATE_VALUE_DOCUMENT_KEY = Pattern.compile(
             "^goods-value-docs/" + UUID + "\\.(png|jpe?g|webp|gif|pdf)$", Pattern.CASE_INSENSITIVE);
     private static final Pattern PRIVATE_CERTIFICATE_KEY = Pattern.compile(
-            "^business-verifications/insurance/" + UUID + "\\.(png|jpe?g|webp|gif|pdf)$", Pattern.CASE_INSENSITIVE);
+            "^business-verifications/(?:insurance|licenses|authorization)/" + UUID + "\\.(png|jpe?g|webp|gif|pdf)$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern PRIVATE_FLEET_DOCUMENT_KEY = Pattern.compile(
+            "^(?:vehicles/(?:registration|inspection)|drivers/license)/" + UUID + "\\.(png|jpe?g|webp|gif|pdf)$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern PRIVATE_URL_KEY = Pattern.compile(
+            "^https?://[^\\s?#]{1,400}/((?:handover-photos|claim-evidence|goods-value-docs|business-verifications/(?:insurance|licenses|authorization)|vehicles/(?:registration|inspection)|drivers/license)/"
+                    + UUID + "\\.(png|jpe?g|webp|gif|pdf))$",
+            Pattern.CASE_INSENSITIVE);
 
     private final MediaService mediaService;
     private final String expectedToken;
@@ -50,12 +58,13 @@ public class InternalMediaController {
     public ResponseEntity<InputStreamResource> object(@RequestHeader(value = "X-Internal-Token", required = false) String token,
                                                       @RequestParam("key") String key) {
         authorize(token);
-        if (!isPrivateObjectKey(key)) {
+        String resolvedKey = resolvePrivateObjectKey(key);
+        if (resolvedKey == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Object not found");
         }
-        String fileName = key.substring(key.lastIndexOf('/') + 1);
+        String fileName = resolvedKey.substring(resolvedKey.lastIndexOf('/') + 1);
         String contentType = fileName.toLowerCase().endsWith(".pdf") ? "application/pdf" : MediaReadPolicy.contentType(fileName);
-        var object = mediaService.open(key);
+        var object = mediaService.open(resolvedKey);
         return ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType(contentType))
                 .cacheControl(CacheControl.noStore())
@@ -64,10 +73,23 @@ public class InternalMediaController {
                 .body(new InputStreamResource(object));
     }
 
+    /** Accepts either a stored object key or a storage URL whose path is an allowed private object key. */
+    static String resolvePrivateObjectKey(String raw) {
+        if (raw == null) return null;
+        String trimmed = raw.trim();
+        if (isPrivateObjectKey(trimmed)) return trimmed;
+        var matcher = PRIVATE_URL_KEY.matcher(trimmed);
+        if (matcher.matches() && isPrivateObjectKey(matcher.group(1))) {
+            return matcher.group(1);
+        }
+        return null;
+    }
+
     /** Only the exact private folders and file-name shapes; a folder prefix or a traversal never matches. */
     static boolean isPrivateObjectKey(String key) {
         return key != null && (PRIVATE_IMAGE_KEY.matcher(key).matches() || PRIVATE_EVIDENCE_KEY.matcher(key).matches()
-                || PRIVATE_VALUE_DOCUMENT_KEY.matcher(key).matches() || PRIVATE_CERTIFICATE_KEY.matcher(key).matches());
+                || PRIVATE_VALUE_DOCUMENT_KEY.matcher(key).matches() || PRIVATE_CERTIFICATE_KEY.matcher(key).matches()
+                || PRIVATE_FLEET_DOCUMENT_KEY.matcher(key).matches());
     }
 
     private void authorize(String token) {

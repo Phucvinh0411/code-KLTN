@@ -1,19 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import useAccountVerification from "@/hooks/useAccountVerification";
+import { useNativeInputSync } from "@/hooks/useNativeInputSync";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
-import Dialog from "@mui/material/Dialog";
-import DialogActions from "@mui/material/DialogActions";
-import DialogContent from "@mui/material/DialogContent";
-import DialogTitle from "@mui/material/DialogTitle";
 import Grid from "@mui/material/Grid";
 import IconButton from "@mui/material/IconButton";
 import InputAdornment from "@mui/material/InputAdornment";
+import ClearIcon from "@mui/icons-material/ClearOutlined";
 import Table from "@mui/material/Table";
 import TableBody from "@mui/material/TableBody";
 import TableCell from "@mui/material/TableCell";
@@ -28,37 +28,37 @@ import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import Paper from "@mui/material/Paper";
 import AccountBalanceIcon from "@mui/icons-material/AccountBalanceOutlined";
-import CloseIcon from "@mui/icons-material/Close";
 import InfoIcon from "@mui/icons-material/InfoOutlined";
 import SearchIcon from "@mui/icons-material/SearchOutlined";
 import WalletIcon from "@mui/icons-material/AccountBalanceWalletOutlined";
 
 import AppCard from "@/components/common/AppCard";
 import PageHeader from "@/components/common/PageHeader";
-import { ErrorState, ListSkeleton } from "@/components/ui";
+import { ErrorState, ListSkeleton, ResponsiveDialog } from "@/components/ui";
 import { useGlobalNotification } from "@/components/common/NotificationPopup";
 import { getApiErrorMessage } from "@/services/errorMessage";
 import { walletApi } from "@/services/walletApi";
+import { getPaginationItemAriaLabel } from "@/lib/format";
+import { getSepayOrderStatusMeta } from "@/lib/statusMeta";
+import {
+  formatPaymentMethodLabel,
+  formatTransactionDescription,
+  formatTransactionReference,
+  formatTransactionShortId,
+  formatTransactionStatusLabel,
+  formatTransactionTypeLabel,
+} from "@/services/walletFormatters";
 import WalletDetailDialog, { WalletDetailRow } from "./WalletDetailDialog";
 
 const OUTFLOW_TYPES = new Set(["WITHDRAW", "FREEZE", "AUCTION_FEE", "PENALTY"]);
-const TRANSACTION_LABELS = {
-  DEPOSIT: "Nạp tiền vào ví",
-  WITHDRAW: "Yêu cầu rút tiền",
-  FREEZE: "Tạm giữ tiền đặt cọc",
-  UNFREEZE: "Hoàn trả tiền đặt cọc",
-  AUCTION_FEE: "Phí tham gia phiên đấu giá",
-  REFUND: "Hoàn tiền",
-  TRANSFER: "Điều chuyển số dư",
-  PENALTY: "Khấu trừ tiền phạt",
-};
 
 function toTableTransaction(transaction) {
   const type = String(transaction.type || "").toUpperCase();
   const amount = Math.abs(Number(transaction.amount || 0));
   return {
     id: transaction.id,
-    typeName: TRANSACTION_LABELS[type] || transaction.description || "Giao dịch ví",
+    shortCode: formatTransactionShortId(transaction.id),
+    typeName: formatTransactionTypeLabel(transaction),
     amount: OUTFLOW_TYPES.has(type) ? -amount : amount,
     time: transaction.createdAt,
     status: String(transaction.status || "").toLowerCase(),
@@ -87,9 +87,12 @@ function formatWalletInput(value) {
   return digits ? new Intl.NumberFormat("vi-VN").format(Number(digits)) : "";
 }
 
-export default function WalletScreen({ role = "shipper", standalone = true }) {
+export default function WalletScreen({ role = "shipper", standalone = true, initialView = "overview" }) {
   const isShipper = role === "shipper";
+  const isTransactionsView = isShipper && initialView === "transactions";
   const { notify } = useGlobalNotification();
+  const verification = useAccountVerification(true);
+  const walletActionsLocked = !verification.loading && !verification.fullyVerified;
   const [balance, setBalance] = useState(0);
   const [frozenBalance, setFrozenBalance] = useState(0);
   const [transactions, setTransactions] = useState([]);
@@ -116,6 +119,12 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
   const [selectedTransaction, setSelectedTransaction] = useState(null);
   const [transactionDetail, setTransactionDetail] = useState(null);
   const [transactionDetailLoading, setTransactionDetailLoading] = useState(false);
+
+  const handleSearchInput = useCallback((value) => {
+    setSearchTerm(value);
+    setPage(0);
+  }, []);
+  const searchInputRef = useNativeInputSync(handleSearchInput);
 
   useEffect(() => {
     let active = true;
@@ -270,6 +279,7 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
         submitCheckoutForm(checkout);
         setPendingTopUp(checkout.invoiceNumber);
         setOpenWalletDialog(false);
+        await refreshWallet().catch(() => {});
         notify.info(`Đã tạo đơn nạp ${formatCurrency(amount)}. Hoàn tất thanh toán ở tab mới để cập nhật số dư.`);
       }
     } catch (error) {
@@ -283,6 +293,7 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
     const result = transactions.filter((transaction) => {
       const term = searchTerm.toLowerCase();
       const matchesSearch = transaction.id.toLowerCase().includes(term)
+        || (transaction.shortCode || "").toLowerCase().includes(term)
         || transaction.typeName.toLowerCase().includes(term);
       return matchesSearch && (statusTab === "all" || transaction.status === statusTab);
     });
@@ -333,27 +344,52 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
     <Box className="w-full min-h-screen">
       {standalone && (
         <PageHeader
-          title={isShipper ? "Ví thanh toán & Ký quỹ" : "Ví thanh toán"}
-          subtitle="Quản lý số dư, tiền tạm giữ và lịch sử giao dịch từ dữ liệu thật."
+          title={isTransactionsView ? "Lịch sử giao dịch ví" : isShipper ? "Ví thanh toán & ký quỹ" : "Ví thanh toán"}
+          subtitle={
+            isTransactionsView
+              ? "Tra cứu, lọc trạng thái và xem chi tiết từng biến động số dư."
+              : "Quản lý số dư, tiền tạm giữ và lịch sử giao dịch từ dữ liệu thật."
+          }
           breadcrumbs={[
             { label: "Trang chủ", path: isShipper ? "/shipper/dashboard" : "/carrier/dashboard" },
-            { label: "Ví điện tử" },
+            ...(isTransactionsView
+              ? [{ label: "Tổng quan ví", path: "/shipper/wallet/overview" }, { label: "Lịch sử giao dịch" }]
+              : [{ label: "Ví điện tử" }]),
           ]}
         />
       )}
 
       <div className="space-y-6 animate-fade-in mt-4">
         {walletLoading ? <ListSkeleton rows={3} height={160} label="Đang tải ví" /> : walletError ? <ErrorState description={walletError} onRetry={() => setReloadKey((key) => key + 1)} /> : <>
+        {isTransactionsView ? (
+          <AppCard showAccent={false} className="border border-line">
+            <CardContent className="!p-5 flex flex-wrap items-center justify-between gap-4">
+              <div className="flex flex-wrap items-center gap-6">
+                <div>
+                  <Typography variant="caption" className="text-ink-muted block">Số dư khả dụng</Typography>
+                  <Typography variant="h5" className="!font-bold tabular text-ink">{formatCurrency(balance)}</Typography>
+                </div>
+                <div>
+                  <Typography variant="caption" className="text-ink-muted block">Đang tạm giữ</Typography>
+                  <Typography variant="h6" className="!font-bold tabular text-ink-muted">{formatCurrency(frozenBalance)}</Typography>
+                </div>
+              </div>
+              <Button component={Link} href="/shipper/wallet/overview" variant="outlined">
+                Mở tổng quan &amp; nạp rút
+              </Button>
+            </CardContent>
+          </AppCard>
+        ) : (
         <Grid container spacing={3}>
           <Grid item xs={12} md={5}>
             <AppCard
               showAccent={false}
-              className="!rounded-xl h-full relative overflow-hidden"
+              className="h-full relative overflow-hidden"
               style={{ background: "var(--color-band)", border: "none" }}
             >
               <CardContent className="!p-8 flex flex-col justify-between h-full space-y-6 text-white">
                 <div className="space-y-1.5">
-                  <Typography className="!text-white/85 font-bold uppercase tracking-wider text-xs flex items-center gap-1.5">
+                  <Typography className="!text-white/85 font-medium text-xs flex items-center gap-1.5">
                     <WalletIcon className="!text-[1rem]" /> Số dư khả dụng
                   </Typography>
                   <Typography variant="h3" className="!font-bold tabular text-white">
@@ -364,10 +400,10 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
                   </Typography>
                 </div>
                 <div className="flex gap-3">
-                  <Button fullWidth variant="contained" onClick={() => handleOpenWalletAction("deposit")} disabled={walletLoading || Boolean(walletError)} className="!bg-white !text-[var(--color-brand)] hover:!bg-brand-soft !font-extrabold !py-3 !rounded-lg !capitalize">
+                  <Button fullWidth variant="contained" size="large" onClick={() => handleOpenWalletAction("deposit")} disabled={walletLoading || Boolean(walletError) || walletActionsLocked} className="!bg-white !text-[var(--color-brand)] hover:!bg-brand-soft">
                     Nạp tiền
                   </Button>
-                  <Button fullWidth variant="outlined" onClick={() => handleOpenWalletAction("withdraw")} disabled={walletLoading || Boolean(walletError)} className="!border-white/50 !text-white hover:!bg-white/10 !font-bold !py-3 !rounded-lg !capitalize">
+                  <Button fullWidth variant="outlined" size="large" onClick={() => handleOpenWalletAction("withdraw")} disabled={walletLoading || Boolean(walletError) || walletActionsLocked} className="!border-white/50 !text-white hover:!bg-white/10">
                     Rút tiền
                   </Button>
                 </div>
@@ -376,7 +412,7 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
           </Grid>
 
           <Grid item xs={12} md={7}>
-            <AppCard showAccent={false} className="!rounded-xl border border-line h-full bg-white/70 backdrop-blur-md">
+            <AppCard showAccent={false} className="border border-line h-full">
               <CardContent className="!p-6 flex flex-col justify-between h-full">
                 <div className="space-y-3">
                   <Typography variant="h6" className="!font-bold text-ink">Quản lý dòng tiền an toàn</Typography>
@@ -396,8 +432,11 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
             </AppCard>
           </Grid>
         </Grid>
+        )}
 
-        <AppCard showAccent={false} className="!rounded-xl border border-line !shadow-[0_8px_32px_0_rgba(27,73,101,0.02)] overflow-hidden">
+        <AppCard showAccent={false} className="border border-line overflow-hidden">
+          {!isTransactionsView && (
+          <>
           <Box className="p-6 border-b border-line">
             <Typography variant="h6" className="!font-bold text-ink mb-3">Yêu cầu rút tiền</Typography>
             {withdrawals.length === 0 ? <Typography variant="body2" className="text-ink-subtle">Chưa có yêu cầu rút tiền.</Typography> : <Box className="grid gap-2 md:grid-cols-2">{withdrawals.slice(0, 6).map((item) => <Box key={item.id} className="flex items-center justify-between rounded-xl border border-line p-3"><Box><Typography variant="body2" className="font-bold">{formatCurrency(item.amount)}</Typography><Typography variant="caption" className="text-ink-muted">{item.bankName} · {item.maskedBankAccountNumber}</Typography></Box><Chip size="small" label={item.status === "PENDING" ? "Đang chờ admin" : item.status === "APPROVED" ? "Đã duyệt" : "Từ chối"} color={item.status === "APPROVED" ? "success" : item.status === "REJECTED" ? "error" : "warning"} /></Box>)}</Box>}
@@ -407,28 +446,36 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
              {topUpOrders.length === 0 ? (
                <Typography variant="body2" className="text-ink-subtle mt-2">Chưa có đơn nạp tiền.</Typography>
              ) : (
-               <Box className="mt-3 grid gap-2 md:grid-cols-2">
-                 {topUpOrders.map((item) => (
-                   <Box key={item.invoiceNumber} className="flex items-center justify-between rounded-xl border border-line p-3 gap-3">
-                     <Box>
-                       <Typography variant="body2" className="font-bold">{formatCurrency(item.amount)}</Typography>
-                       <Typography variant="caption" className="text-ink-muted">{item.invoiceNumber} · {item.status}</Typography>
-                     </Box>
-                     {item.status === "CREATED" && (
-                       <Button
-                         size="small"
-                         color="error"
-                         onClick={() => handleCancelTopUp(item.invoiceNumber)}
-                         disabled={topUpActionLoading === item.invoiceNumber}
-                       >
-                         {topUpActionLoading === item.invoiceNumber ? "Đang hủy..." : "Hủy"}
-                       </Button>
-                     )}
-                   </Box>
-                 ))}
-               </Box>
+                 <Box className="mt-3 grid gap-2 md:grid-cols-2">
+                   {topUpOrders.map((item) => {
+                     const statusMeta = getSepayOrderStatusMeta(item.status);
+                     return (
+                       <Box key={item.invoiceNumber} className="flex items-center justify-between rounded-xl border border-line p-3 gap-3">
+                         <Box>
+                           <Box className="flex items-center gap-2 flex-wrap">
+                             <Typography variant="body2" className="font-bold">{formatCurrency(item.amount)}</Typography>
+                             <Chip size="small" label={statusMeta.label} color={statusMeta.chipColor} variant="outlined" />
+                           </Box>
+                           <Typography variant="caption" className="text-ink-muted">{item.invoiceNumber}</Typography>
+                         </Box>
+                         {item.status === "CREATED" && (
+                           <Button
+                             size="small"
+                             color="error"
+                             onClick={() => handleCancelTopUp(item.invoiceNumber)}
+                             disabled={topUpActionLoading === item.invoiceNumber}
+                           >
+                             {topUpActionLoading === item.invoiceNumber ? "Đang hủy..." : "Hủy"}
+                           </Button>
+                         )}
+                       </Box>
+                     );
+                   })}
+                 </Box>
              )}
            </Box>
+          </>
+          )}
            <Box className="p-6 border-b border-line flex flex-col md:flex-row md:items-center justify-between gap-4">
             <Typography variant="h6" className="!font-bold text-ink">Lịch sử giao dịch ví</Typography>
             <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
@@ -439,12 +486,29 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
                 <Tab label="Thất bại" value="failed" />
               </Tabs>
               <TextField
+                id="wallet-transaction-search"
+                name="walletSearch"
                 label="Tìm giao dịch"
                 size="small"
                 value={searchTerm}
-                onChange={(event) => { setSearchTerm(event.target.value); setPage(0); }}
+                onChange={(event) => handleSearchInput(event.target.value)}
+                onInput={(event) => handleSearchInput(event.target.value)}
+                inputRef={searchInputRef}
                 className="w-full sm:w-60"
-                InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon className="text-ink-subtle" fontSize="small" /></InputAdornment> }}
+                InputProps={{
+                  startAdornment: <InputAdornment position="start"><SearchIcon className="text-ink-subtle" fontSize="small" /></InputAdornment>,
+                  endAdornment: searchTerm ? (
+                    <InputAdornment position="end">
+                      <IconButton
+                        size="small"
+                        aria-label="Xóa từ khóa tìm kiếm"
+                        onClick={() => handleSearchInput("")}
+                      >
+                        <ClearIcon fontSize="small" />
+                      </IconButton>
+                    </InputAdornment>
+                  ) : null,
+                }}
               />
             </div>
           </Box>
@@ -490,7 +554,9 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
                   <TableRow><TableCell colSpan={6} align="center" className="!py-12 text-ink-subtle">Chưa có giao dịch phù hợp.</TableCell></TableRow>
                 ) : paginatedTransactions.map((transaction) => (
                   <TableRow key={transaction.id} className="hover:bg-surface-sunken/40 transition-colors">
-                    <TableCell className="!font-mono !font-bold text-ink-subtle !border-line">{transaction.id}</TableCell>
+                    <TableCell className="!font-mono !font-bold text-ink-subtle !border-line" title={transaction.id}>
+                      {transaction.shortCode}
+                    </TableCell>
                     <TableCell className="!font-bold text-ink !border-line">{transaction.typeName}</TableCell>
                     <TableCell align="right" className={`!font-mono !font-bold !border-line ${transaction.amount > 0 ? "!text-[var(--color-success)]" : "!text-danger"}`}>
                       {transaction.amount > 0 ? `+${formatCurrency(transaction.amount)}` : formatCurrency(transaction.amount)}
@@ -500,7 +566,7 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
                       <Chip label={transaction.status === "success" ? "Thành công" : transaction.status === "pending" ? "Đang xử lý" : "Thất bại"} size="small" color={transaction.status === "success" ? "success" : transaction.status === "pending" ? "warning" : "error"} className="!font-bold !text-[0.68rem]" />
                     </TableCell>
                     <TableCell align="center" className="!border-line">
-                      <Button size="small" onClick={() => handleOpenTransactionDetail(transaction)} className="!font-bold !capitalize">Xem</Button>
+                      <Button size="small" onClick={() => handleOpenTransactionDetail(transaction)}>Xem</Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -516,6 +582,8 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
             onPageChange={(event, nextPage) => setPage(nextPage)}
             onRowsPerPageChange={(event) => { setRowsPerPage(Number(event.target.value)); setPage(0); }}
             labelRowsPerPage="Số dòng:"
+            getItemAriaLabel={getPaginationItemAriaLabel}
+            SelectProps={{ inputProps: { id: "wallet-transactions-rows-per-page", name: "rowsPerPage", "aria-label": "Số dòng mỗi trang" } }}
             sx={{ "& .MuiTablePagination-toolbar": { flexWrap: "wrap", px: 1 }, "& .MuiTablePagination-spacer": { flex: "1 1 0" } }}
             labelDisplayedRows={({ from, to, count }) => `${from}-${to} trong ${count}`}
           />
@@ -523,12 +591,25 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
         </>}
       </div>
 
-      <Dialog open={openWalletDialog} onClose={() => setOpenWalletDialog(false)} maxWidth="xs" fullWidth PaperProps={{ className: "!rounded-xl !p-2" }}>
-        <DialogTitle className="flex justify-between items-center !font-bold text-ink">
-          {walletActionType === "deposit" ? "Nạp tiền qua SePay Sandbox" : "Yêu cầu rút tiền"}
-          <IconButton size="small" onClick={() => setOpenWalletDialog(false)} className="text-ink-subtle"><CloseIcon /></IconButton>
-        </DialogTitle>
-        <DialogContent className="space-y-4 !pt-2">
+      <ResponsiveDialog
+        open={openWalletDialog}
+        onClose={() => !walletActionLoading && setOpenWalletDialog(false)}
+        title={walletActionType === "deposit" ? "Nạp tiền qua SePay" : "Yêu cầu rút tiền"}
+        titleId="wallet-action-dialog-title"
+        maxWidth="xs"
+        busy={walletActionLoading}
+        actions={
+          <>
+            <Button onClick={() => setOpenWalletDialog(false)} variant="text" disabled={walletActionLoading}>
+              Hủy
+            </Button>
+            <Button onClick={handleWalletActionSubmit} disabled={!walletAmount || walletActionLoading} variant="contained">
+              {walletActionLoading ? <CircularProgress size={20} color="inherit" /> : walletActionType === "deposit" ? "Tạo đơn thanh toán" : "Gửi yêu cầu rút"}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
           {walletActionType === "deposit" ? (
             <Alert severity="info">Sau khi tạo đơn, trang thanh toán SePay sẽ mở ở tab mới. Số dư cập nhật khi thanh toán được xác nhận.</Alert>
           ) : (
@@ -544,8 +625,11 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
             onChange={(event) => setWalletAmount(event.target.value.replace(/\D/g, ""))}
             disabled={walletActionLoading}
             helperText="Tự động phân tách hàng nghìn để dễ kiểm tra"
-            inputProps={{ "aria-label": walletActionType === "deposit" ? "Số tiền nạp bằng VND" : "Số tiền rút bằng VND" }}
-            InputProps={{ className: "!rounded-lg", startAdornment: <InputAdornment position="start">₫</InputAdornment> }}
+            inputProps={{
+              "aria-label": walletActionType === "deposit" ? "Số tiền nạp bằng VND" : "Số tiền rút bằng VND",
+              style: { fontVariantNumeric: "tabular-nums", fontWeight: 600 },
+            }}
+            InputProps={{ startAdornment: <InputAdornment position="start">₫</InputAdornment> }}
           />
           {walletActionType === "withdraw" && (
             <>
@@ -554,14 +638,8 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
               <TextField label="Tên chủ tài khoản" fullWidth value={accountHolderName} onChange={(event) => setAccountHolderName(event.target.value)} disabled={walletActionLoading} />
             </>
           )}
-        </DialogContent>
-        <DialogActions className="!px-6 !pb-4 flex justify-end gap-3">
-          <Button onClick={() => setOpenWalletDialog(false)} variant="text" className="!text-ink-muted !font-bold !capitalize !rounded-xl">Hủy</Button>
-          <Button onClick={handleWalletActionSubmit} disabled={!walletAmount || walletActionLoading} variant="contained" className="!font-bold !capitalize !rounded-xl !px-5 !text-white" sx={{ background: "var(--color-brand)", "&:hover": { background: "var(--color-brand-hover)" }, "&.Mui-disabled": { background: "var(--color-ink-subtle)", color: "var(--color-surface-sunken)" } }}>
-            {walletActionLoading ? <CircularProgress size={20} className="!text-white" /> : walletActionType === "deposit" ? "Tạo đơn thanh toán" : "Gửi yêu cầu rút"}
-          </Button>
-        </DialogActions>
-      </Dialog>
+        </div>
+      </ResponsiveDialog>
 
       <WalletDetailDialog
         open={Boolean(selectedTransaction)}
@@ -571,13 +649,13 @@ export default function WalletScreen({ role = "shipper", standalone = true }) {
       >
         {transactionDetail && (
           <Box>
-            <WalletDetailRow label="Mã giao dịch" value={transactionDetail.id} />
-            <WalletDetailRow label="Loại giao dịch" value={transactionDetail.type} />
+            <WalletDetailRow label="Mã giao dịch" value={formatTransactionShortId(transactionDetail.id)} />
+            <WalletDetailRow label="Loại giao dịch" value={formatTransactionTypeLabel(transactionDetail)} />
             <WalletDetailRow label="Số tiền" value={formatCurrency(transactionDetail.amount)} />
-            <WalletDetailRow label="Trạng thái" value={transactionDetail.status} />
-            <WalletDetailRow label="Phương thức" value={transactionDetail.paymentMethod} />
-            <WalletDetailRow label="Mã tham chiếu" value={transactionDetail.referenceCode} />
-            <WalletDetailRow label="Nội dung" value={transactionDetail.description} />
+            <WalletDetailRow label="Trạng thái" value={formatTransactionStatusLabel(transactionDetail.status)} />
+            <WalletDetailRow label="Phương thức" value={formatPaymentMethodLabel(transactionDetail.paymentMethod)} />
+            <WalletDetailRow label="Mã tham chiếu" value={formatTransactionReference(transactionDetail.referenceCode)} />
+            <WalletDetailRow label="Nội dung" value={formatTransactionDescription(transactionDetail)} />
             <WalletDetailRow label="Thời gian" value={transactionDetail.createdAt ? new Date(transactionDetail.createdAt).toLocaleString("vi-VN") : undefined} />
           </Box>
         )}

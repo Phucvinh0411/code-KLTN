@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -14,7 +15,8 @@ import { contractApi } from "@/services/contractApi";
 import { mediaApi } from "@/services/mediaApi";
 import { getApiErrorMessage } from "@/services/errorMessage";
 import { getExecutorJourneySteps, isTripClosed } from "@/lib/statusMeta";
-import AssignDriverDialog from "./AssignDriverDialog";
+
+const AssignDriverDialog = dynamic(() => import("./AssignDriverDialog"), { ssr: false });
 
 const MAX_PROOF_BYTES = 10 * 1024 * 1024;
 
@@ -193,12 +195,13 @@ function IncidentDialog({ open, trip, onClose, onDone }) {
  *  - shipper accepts the delivery (DELIVERY_ACCEPTED → COMPLETED) once it is DELIVERED.
  * Completion by the carrier and cancellation are intentionally not offered here.
  */
-export default function TripActions({ trip, role, proofs = [], onChanged }) {
+export default function TripActions({ trip, role, proofs = [], events = [], onChanged }) {
   const { notify } = useGlobalNotification();
   const [dialog, setDialog] = useState(null);
   const [error, setError] = useState("");
   const [busy, run] = useSingleFlight();
   const closed = isTripClosed(trip.status);
+  const recordedEventTypes = new Set((events || []).map((event) => event?.eventType).filter(Boolean));
   const complaintHref = `/${role}/complaints?new=1&tripId=${encodeURIComponent(trip.id)}`;
 
   const done = async (message) => {
@@ -234,35 +237,49 @@ export default function TripActions({ trip, role, proofs = [], onChanged }) {
   let body = null;
   if (role === "carrier" && !closed) {
     const steps = getExecutorJourneySteps(trip.status);
+    const waitingContractSignature = Boolean(trip.contractStatus && trip.contractStatus !== "SIGNED");
     body = (
       <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
-        {trip.status === "WAITING_PICKUP" && !trip.driverId && (
+        {trip.status === "WAITING_PICKUP" && !trip.driverId && waitingContractSignature && (
+          <Alert
+            severity="info"
+            action={
+              <Button color="inherit" size="small" component={Link} href="/carrier/contracts">
+                Mở hợp đồng
+              </Button>
+            }
+          >
+            Hợp đồng chưa hoàn tất ký kết (đang chờ ký). Hoàn tất ký hợp đồng trước khi phân công tài xế.
+          </Alert>
+        )}
+        {trip.status === "WAITING_PICKUP" && !trip.driverId && !waitingContractSignature && (
           <Alert severity="warning" action={<Button color="inherit" size="small" onClick={() => setDialog("assign")}>Phân công</Button>}>
             Chuyến chưa có tài xế.
           </Alert>
         )}
-        {trip.status === "WAITING_PICKUP" && trip.driverId && !trip.driverConnected && (
+        {trip.status === "WAITING_PICKUP" && trip.driverId && !trip.driverConnected && !waitingContractSignature && (
           <Alert severity="info">Chờ tài xế nhập mã nhận chuyến trong app. Nếu mã hết hạn hoặc thất lạc, cấp lại mã.</Alert>
         )}
         {trip.status === "DELIVERED" && <Typography variant="body2">Đã giao. Đang chờ chủ hàng xác nhận để hoàn thành chuyến.</Typography>}
         <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap", "& > *": { flex: { xs: "1 1 100%", sm: "0 0 auto" } } }}>
-          {steps.map((step) =>
-            step.requiresProof ? (
+          {!waitingContractSignature && steps.map((step) => {
+            const stepRecorded = !step.status && recordedEventTypes.has(step.eventType);
+            return step.requiresProof ? (
               <Button key={step.eventType} variant={step.primary ? "contained" : "outlined"} onClick={() => setDialog("proof")} disabled={busy}>
                 {step.label}
               </Button>
             ) : (
-              <Button key={step.eventType} variant={step.primary ? "contained" : "outlined"} onClick={() => recordStep(step)} disabled={busy}>
+              <Button key={step.eventType} variant={step.primary ? "contained" : "outlined"} onClick={() => recordStep(step)} disabled={busy || stepRecorded}>
                 {step.label}
               </Button>
-            ),
-          )}
-          {trip.status === "WAITING_PICKUP" && trip.driverId && (
+            );
+          })}
+          {trip.status === "WAITING_PICKUP" && trip.driverId && !waitingContractSignature && (
             <Button variant="outlined" color="inherit" onClick={() => setDialog("assign")} disabled={busy}>
               Đổi tài xế
             </Button>
           )}
-          {trip.driverId && ["WAITING_PICKUP", "PICKED_UP", "IN_TRANSIT"].includes(trip.status) && (
+          {trip.driverId && ["WAITING_PICKUP", "PICKED_UP", "IN_TRANSIT"].includes(trip.status) && !waitingContractSignature && (
             <Button variant="outlined" color="inherit" onClick={() => setDialog("reissue")} disabled={busy}>
               Cấp lại mã nhận chuyến
             </Button>
@@ -315,8 +332,8 @@ export default function TripActions({ trip, role, proofs = [], onChanged }) {
         <>
           <ProofDialog open={dialog === "proof"} trip={trip} onClose={() => setDialog(null)} onDone={done} />
           <IncidentDialog open={dialog === "incident"} trip={trip} onClose={() => setDialog(null)} onDone={done} />
-          <AssignDriverDialog open={dialog === "assign"} trip={trip} onClose={() => { setDialog(null); void onChanged?.(); }} />
-          <AssignDriverDialog open={dialog === "reissue"} mode="reissue" trip={trip} onClose={() => { setDialog(null); void onChanged?.(); }} />
+          {dialog === "assign" && <AssignDriverDialog open trip={trip} onClose={() => { setDialog(null); void onChanged?.(); }} />}
+          {dialog === "reissue" && <AssignDriverDialog open mode="reissue" trip={trip} onClose={() => { setDialog(null); void onChanged?.(); }} />}
         </>
       )}
       {role === "shipper" && (

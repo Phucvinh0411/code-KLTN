@@ -16,6 +16,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /** Coordinates wallet mutations while keeping idempotency and transaction rules in one place. */
@@ -109,6 +110,24 @@ public class InternalWalletService {
     }
 
     /**
+     * Saga compensation: releases an orphaned hold by its original hold idempotencyKey
+     * when the caller crashed before receiving or persisting holdId. Returns empty if
+     * the hold never reached wallet-service so no spurious transaction is created.
+     */
+    @Transactional
+    public Optional<InternalWalletOperation> releaseByHoldKey(
+            String holdIdempotencyKey,
+            InternalWalletReleaseRequest request) {
+        Transaction hold = findByOperationKey(holdIdempotencyKey);
+        if (hold == null
+                || hold.getType() != TransactionType.FREEZE
+                || hold.getStatus() != TransactionStatus.SUCCESS) {
+            return Optional.empty();
+        }
+        return Optional.of(release(hold.getId(), request));
+    }
+
+    /**
      * Edge Case 4: Giải tỏa tiền cọc cho nhà xe trượt thầu từ sự kiện RabbitMQ 'auction.unfreeze_losers',
      * đảm bảo tính toàn vẹn Idempotency với khóa chuẩn: {auctionId}_{userId}_unfreeze.
      */
@@ -161,9 +180,12 @@ public class InternalWalletService {
             }
             wallet.unfreeze(remaining);
             Transaction penalty = wallet.withdraw(remaining);
-            penalty.setType(TransactionType.PENALTY);
+            boolean auctionCreationFee = isAuctionCreationFee(hold, request);
+            penalty.setType(auctionCreationFee ? TransactionType.AUCTION_FEE : TransactionType.PENALTY);
             penalty.setReferenceCode(request.idempotencyKey());
-            penalty.setDescription("Forfeit auction deposit hold " + holdId);
+            penalty.setDescription(auctionCreationFee
+                    ? "Phí tạo phiên đấu giá #" + shortRef(request.idempotencyKey())
+                    : "Khấu trừ tiền đặt cọc phiên #" + shortRef(holdId));
             penalty.setIdempotencyKey(request.idempotencyKey());
             hold.setRemainingHoldAmount(BigDecimal.ZERO);
             walletRepository.saveAndFlush(wallet);
@@ -171,6 +193,21 @@ public class InternalWalletService {
         } catch (IllegalArgumentException | IllegalStateException exception) {
             throw failure(exception.getMessage());
         }
+    }
+
+    private static boolean isAuctionCreationFee(Transaction hold, InternalWalletReleaseRequest request) {
+        String key = request != null ? request.idempotencyKey() : null;
+        String ref = hold != null ? hold.getReferenceCode() : null;
+        return (key != null && key.startsWith("auction_creation_fee_"))
+                || (ref != null && ref.startsWith("auction_creation_fee_"));
+    }
+
+    private static String shortRef(Object value) {
+        if (value == null) return "";
+        String raw = value.toString()
+                .replaceFirst("^auction_creation_fee_", "")
+                .replaceAll(":.*$", "");
+        return raw.length() >= 8 ? raw.substring(0, 8).toUpperCase() : raw.toUpperCase();
     }
 
     /** Transfers a single incremental late-delivery penalty directly from the frozen deposit. */

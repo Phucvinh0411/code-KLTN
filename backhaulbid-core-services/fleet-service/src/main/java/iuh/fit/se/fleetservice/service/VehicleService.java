@@ -69,12 +69,6 @@ public class VehicleService {
     }
 
     @Transactional
-    public List<Vehicle> createBulk(UUID carrierId, List<CreateVehicleRequest> requests) {
-        validateBulkSize(requests);
-        return requests.stream().map(request -> create(carrierId, request)).toList();
-    }
-
-    @Transactional
     public Vehicle update(UUID carrierId, UUID vehicleId, UpdateVehicleRequest request) {
         Vehicle vehicle = findOwned(carrierId, vehicleId);
         String licensePlate = normalize(request.licensePlate());
@@ -157,6 +151,35 @@ public class VehicleService {
         return vehicleRepository.save(vehicle);
     }
 
+    @Transactional(readOnly = true)
+    public String getAuthorizedDocumentUrl(UUID accountId, String role, UUID vehicleId, String kind) {
+        if (!"ADMIN".equalsIgnoreCase(role) && !"CARRIER".equalsIgnoreCase(role)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Carrier or admin role required");
+        }
+        VehicleDocumentType docType = switch (kind == null ? "" : kind.toLowerCase()) {
+            case "registration" -> VehicleDocumentType.REGISTRATION;
+            case "inspection" -> VehicleDocumentType.INSPECTION_CERTIFICATE;
+            default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported vehicle document kind");
+        };
+        Vehicle vehicle = vehicleRepository.findById(vehicleId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Vehicle not found"));
+        if (!"ADMIN".equalsIgnoreCase(role) && !accountId.equals(vehicle.getCarrierId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Vehicle does not belong to the carrier");
+        }
+        String url = null;
+        if (vehicle.getDocuments() != null) {
+            for (VehicleDocument doc : vehicle.getDocuments()) {
+                if (doc.getDocumentType() == docType) {
+                    url = doc.getDocumentUrl();
+                }
+            }
+        }
+        if (url == null || url.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Chưa có tài liệu phương tiện");
+        }
+        return url;
+    }
+
     private Vehicle findOwned(UUID carrierId, UUID vehicleId) {
         Vehicle vehicle = vehicleRepository.findById(vehicleId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Vehicle not found"));
@@ -187,11 +210,5 @@ public class VehicleService {
 
     private boolean safeEquals(String left, String right) {
         return left == null ? right == null : left.equals(right);
-    }
-
-    private void validateBulkSize(List<?> requests) {
-        if (requests == null || requests.isEmpty() || requests.size() > 500) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Bulk import must contain 1 to 500 records");
-        }
     }
 }

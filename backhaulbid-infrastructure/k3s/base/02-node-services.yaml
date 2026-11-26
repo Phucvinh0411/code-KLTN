@@ -1,0 +1,289 @@
+# ==============================================================================
+# NestJS Microservices:
+#   1. bidding-service      (port 3001, HTTP + Socket.IO /bidding-socket + RMQ)
+#   2. notification-service (port 3002, HTTP + Socket.IO /notification-socket + RMQ)
+# ==============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: bidding-service
+  namespace: backhaulbid
+spec:
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  selector:
+    app: bidding-service
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bidding-service
+  namespace: backhaulbid
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: bidding-service
+  template:
+    metadata:
+      labels:
+        app: bidding-service
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      containers:
+        - name: bidding-service
+          image: backhaulbid/bidding-service:v1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          ports:
+            - containerPort: 3001
+              name: http
+          env:
+            - name: PORT
+              value: "3001"
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: backhaulbid-secrets
+                  key: MONGO_BIDDING_URI
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: backhaulbid-secrets
+                  key: REDIS_URL
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: backhaulbid-secrets
+                  key: RABBITMQ_URL
+            - name: WALLET_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: backhaulbid-config
+                  key: WALLET_SERVICE_URL
+            - name: CONTRACT_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: backhaulbid-config
+                  key: CONTRACT_SERVICE_URL
+            - name: FLEET_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: backhaulbid-config
+                  key: FLEET_SERVICE_URL
+            - name: IDENTITY_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: backhaulbid-config
+                  key: IDENTITY_SERVICE_URL
+            - name: MEDIA_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: backhaulbid-config
+                  key: MEDIA_SERVICE_URL
+            - name: NOTIFICATION_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: backhaulbid-config
+                  key: NOTIFICATION_SERVICE_URL
+            - name: INTERNAL_WALLET_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: backhaulbid-secrets
+                  key: INTERNAL_WALLET_TOKEN
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: backhaulbid-secrets
+                  key: INTERNAL_SERVICE_TOKEN
+            - name: SWAGGER_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: backhaulbid-config
+                  key: SWAGGER_ENABLED
+            - name: OPENAPI_GATEWAY_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: backhaulbid-config
+                  key: OPENAPI_GATEWAY_SERVER_URL
+            - name: OPENAPI_DIRECT_SERVER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: backhaulbid-config
+                  key: OPENAPI_DIRECT_SERVER_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 320Mi
+          startupProbe:
+            httpGet:
+              path: /api/v1/bidding
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /api/v1/bidding
+              port: 3001
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v1/bidding
+              port: 3001
+            periodSeconds: 20
+            timeoutSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: backhaulbid
+spec:
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  selector:
+    app: notification-service
+  ports:
+    - name: http
+      port: 3002
+      targetPort: 3002
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: backhaulbid
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      containers:
+        - name: notification-service
+          image: backhaulbid/notification-service:v1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          ports:
+            - containerPort: 3002
+              name: http
+          env:
+            - name: NOTIFICATION_PORT
+              value: "3002"
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: backhaulbid-secrets
+                  key: INTERNAL_SERVICE_TOKEN
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: backhaulbid-secrets
+                  key: MONGO_NOTIFICATION_URI
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: backhaulbid-secrets
+                  key: REDIS_URL
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: backhaulbid-secrets
+                  key: RABBITMQ_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 300m
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: /api/v1/notifications/health
+              port: 3002
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /api/v1/notifications/health
+              port: 3002
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v1/notifications/health
+              port: 3002
+            periodSeconds: 20
+            timeoutSeconds: 5

@@ -38,6 +38,7 @@ import { getApiErrorMessage }       from "@/services/errorMessage";
 import { ADDRESS_UNAVAILABLE_MESSAGE, reverseGeocode }           from "@/utils/geocoding";
 import { searchPlacesLikeGrab }     from "@/utils/vietnamPlaces";
 import { useGlobalNotification }    from "@/components/common/NotificationPopup";
+import SyncedDateTimeField          from "@/components/ui/SyncedDateTimeField";
 
 // ─── Dynamic import Leaflet map để tránh SSR ───
 const RoutePickerMap = dynamic(() => import("./RoutePickerMap"), {
@@ -98,6 +99,11 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
   // ── Thời gian ──
   const [expectedTime, setExpectedTime]           = useState("");
   const [expectedArrivalTime, setExpectedArrivalTime] = useState("");
+  const minLocalDateTime = useMemo(() => {
+    const now = new Date();
+    const offsetMs = now.getTimezoneOffset() * 60000;
+    return new Date(now.getTime() - offsetMs).toISOString().slice(0, 16);
+  }, [open]);
 
   // ── Bán kính tìm kiếm (km) ──
   const [searchRadius, setSearchRadius]           = useState(50);
@@ -106,7 +112,7 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
   const tripDurationText = useMemo(() => {
     if (!expectedTime || !expectedArrivalTime) return null;
     const diffMs = new Date(expectedArrivalTime) - new Date(expectedTime);
-    if (diffMs <= 0) return "⚠️ Thời gian đến phải sau thời gian xuất phát";
+    if (diffMs <= 0) return "Thời gian đến phải sau thời gian xuất phát";
     const totalMinutes = Math.floor(diffMs / 60000);
     const days    = Math.floor(totalMinutes / 1440);
     const hours   = Math.floor((totalMinutes % 1440) / 60);
@@ -115,7 +121,7 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
     if (days)    parts.push(`${days} ngày`);
     if (hours)   parts.push(`${hours} giờ`);
     if (minutes) parts.push(`${minutes} phút`);
-    return `🕐 Dự kiến di chuyển: ${parts.join(" ")}`;
+    return `Dự kiến di chuyển: ${parts.join(" ")}`;
   }, [expectedTime, expectedArrivalTime]);
 
   // ── Gợi ý tải trọng từ xe đã chọn ──
@@ -363,11 +369,11 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
             <LocalShippingIcon />
           </div>
           <div>
-            <Typography variant="h6" sx={{ fontWeight: 800, fontSize: "1.1rem", lineHeight: 1.2 }}>
-              Khai báo chuyến xe rỗng chiều
+            <Typography variant="h6" sx={{ fontWeight: 700, fontSize: "1.1rem", lineHeight: 1.2 }}>
+              Khai báo tuyến xe rỗng
             </Typography>
             <Typography variant="caption" sx={{ color: "rgba(255,255,255,0.75)", fontWeight: 500 }}>
-              Tìm kiếm địa chỉ thông minh · Định vị tọa độ chính xác như Grab
+              Chọn phương tiện, lộ trình và khung giờ nhận hàng chiều về
             </Typography>
           </div>
         </div>
@@ -429,9 +435,9 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
       >
         {/* ══════════ KHỐI 1: PHƯƠNG TIỆN & TẢI TRỌNG ══════════ */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-line/80 shadow-xs space-y-3">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ink-muted">
+          <div className="flex items-center gap-2 text-xs font-medium text-ink-muted">
             <LocalShippingIcon className="!text-base text-info" />
-            <span>1. Phương tiện thực hiện & Tải trọng nhận hàng</span>
+            <span>Phương tiện thực hiện &amp; tải trọng nhận hàng</span>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -454,12 +460,6 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
               }}
               disabled={loading}
               helperText="Chỉ phương tiện ĐÃ DUYỆT (VERIFIED) mới được khai báo"
-              sx={{
-                "& .MuiOutlinedInput-root": {
-                  borderRadius: "14px",
-                  bgcolor: "var(--color-surface)",
-                },
-              }}
             >
               {vehicles.length === 0 && (
                 <MenuItem value="" disabled>Chưa có xe nào trong hệ thống</MenuItem>
@@ -508,12 +508,6 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
                   </InputAdornment>
                 ),
               }}
-              sx={{
-                "& .MuiOutlinedInput-root": {
-                  borderRadius: "14px",
-                  bgcolor: "var(--color-surface)",
-                },
-              }}
             />
           </div>
 
@@ -534,28 +528,28 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
           )}
         </div>
 
-        {/* ══════════ KHỐI 2: LỘ TRÌNH ĐỊA CHỈ & BẢN ĐỒ KIỂU GRAB ══════════ */}
+        {/* ══════════ KHỐI 2: LỘ TRÌNH ĐỊA CHỈ & BẢN ĐỒ ══════════ */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-line/80 shadow-xs space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
-            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ink-muted">
+            <div className="flex items-center gap-2 text-xs font-medium text-ink-muted">
               <PlaceIcon className="!text-base text-success" />
-              <span>2. Lộ trình di chuyển (Tìm kiếm địa chỉ kiểu Grab)</span>
+              <span>Lộ trình di chuyển</span>
             </div>
-            <span className="text-[11px] text-ink-subtle">
-              💡 Gõ tên kho bãi, KCN, cảng biển hoặc nhấp trực tiếp trên bản đồ
+            <span className="text-xs text-ink-subtle">
+              Gõ tên kho bãi, KCN, cảng biển hoặc nhấp trực tiếp trên bản đồ
             </span>
           </div>
 
-          {/* HỘP NHẬP LIỆU LỘ TRÌNH KIỂU GRAB */}
+          {/* HỘP NHẬP LIỆU LỘ TRÌNH */}
           <div className="relative bg-surface-sunken/70 p-4 rounded-xl border border-line/90">
             <div className="flex items-stretch gap-3">
-              {/* Cột icon lộ trình Grab (Chấm xanh A - Dây nối - Vuông cam B) */}
+              {/* Cột icon lộ trình (Chấm xanh A - Dây nối - Vuông cam B) */}
               <div className="flex flex-col items-center justify-between py-3">
-                <div className="w-5 h-5 rounded-full bg-success text-white text-[10px] font-black flex items-center justify-center shadow-xs">
+                <div className="w-5 h-5 rounded-full bg-success text-white text-[10px] font-bold flex items-center justify-center shadow-xs">
                   A
                 </div>
                 <div className="w-0.5 flex-1 my-1 border-l-2 border-dashed border-line-strong"></div>
-                <div className="w-5 h-5 rounded-md bg-warning text-white text-[10px] font-black flex items-center justify-center shadow-xs">
+                <div className="w-5 h-5 rounded-md bg-warning text-white text-[10px] font-bold flex items-center justify-center shadow-xs">
                   B
                 </div>
               </div>
@@ -660,48 +654,32 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
 
         {/* ══════════ KHỐI 3: THỜI GIAN ĐI & ĐẾN ══════════ */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-line/80 shadow-xs space-y-3">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ink-muted">
+          <div className="flex items-center gap-2 text-xs font-medium text-ink-muted">
             <ScheduleIcon className="!text-base text-info" />
-            <span>3. Thời gian đi và đến chính xác (Ngày & Giờ)</span>
+            <span>Thời gian đi và đến dự kiến</span>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <TextField
-              label="Thời gian xe bắt đầu rỗng (Khởi hành)"
-              type="datetime-local"
-              fullWidth
-              required
-              InputLabelProps={{ shrink: true }}
-              inputProps={{ min: new Date().toISOString().slice(0, 16) }}
-              value={expectedTime}
-              onChange={(e) => setExpectedTime(e.target.value)}
-              disabled={loading}
-              helperText="Mốc thời gian xe sẵn sàng nhận hàng trên đường về"
-              sx={{
-                "& .MuiOutlinedInput-root": {
-                  borderRadius: "14px",
-                  bgcolor: "var(--color-surface)",
-                },
-              }}
-            />
-            <TextField
-              label="Thời gian dự kiến đến nơi (Hạn chót)"
-              type="datetime-local"
-              fullWidth
-              required
-              InputLabelProps={{ shrink: true }}
-              inputProps={{ min: expectedTime || new Date().toISOString().slice(0, 16) }}
-              value={expectedArrivalTime}
-              onChange={(e) => setExpectedArrivalTime(e.target.value)}
-              disabled={loading}
-              helperText="Hạn chót xe phải có mặt tại điểm đến mong muốn"
-              sx={{
-                "& .MuiOutlinedInput-root": {
-                  borderRadius: "14px",
-                  bgcolor: "var(--color-surface)",
-                },
-              }}
-            />
+              <SyncedDateTimeField
+                label="Thời gian xe bắt đầu rỗng (Khởi hành)"
+                name="expectedEmptyTime"
+                required
+                inputProps={{ min: minLocalDateTime }}
+                value={expectedTime}
+                onValueChange={setExpectedTime}
+                disabled={loading}
+                helperText="Mốc thời gian xe sẵn sàng nhận hàng trên đường về"
+              />
+              <SyncedDateTimeField
+                label="Thời gian dự kiến đến nơi (Hạn chót)"
+                name="expectedArrivalTime"
+                required
+                inputProps={{ min: expectedTime || minLocalDateTime }}
+                value={expectedArrivalTime}
+                onValueChange={setExpectedArrivalTime}
+                disabled={loading}
+                helperText="Hạn chót xe phải có mặt tại điểm đến mong muốn"
+              />
           </div>
 
           {tripDurationText && (
@@ -714,9 +692,9 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
 
         {/* ══════════ KHỐI 4: BÁN KÍNH TÌM KIẾM GIS ══════════ */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-line/80 shadow-xs space-y-3">
-          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-ink-muted">
+          <div className="flex items-center gap-2 text-xs font-medium text-ink-muted">
             <RadarIcon className="!text-base text-brand" />
-            <span>4. Bán kính quét tìm lô hàng phù hợp (GIS)</span>
+            <span>Bán kính quét tìm lô hàng phù hợp</span>
           </div>
 
           <div className="bg-brand-soft/60 border border-brand-soft rounded-xl px-5 pt-4 pb-4 space-y-3">
@@ -724,7 +702,7 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
               <Typography variant="body2" className="text-brand font-semibold text-sm">
                 Quét lô hàng trong phạm vi bán kính quanh điểm xuất phát:
               </Typography>
-              <span className="text-2xl font-black text-brand">{searchRadius} km</span>
+              <span className="text-2xl font-bold text-brand tabular">{searchRadius} km</span>
             </div>
 
             <Slider
@@ -750,7 +728,7 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
           </div>
         </div>
 
-        <Alert severity="info" sx={{ borderRadius: "14px", fontSize: "0.8rem", bgcolor: "var(--color-info-soft)" }}>
+        <Alert severity="info" sx={{ fontSize: "0.8rem" }}>
           Hệ thống <strong>BackHaulBid</strong> sử dụng công thức định vị GIS <strong>Haversine</strong> để tự động ghép xe với các đơn hàng đấu giá có lộ trình tương thích, giúp xe không bị chạy rỗng chiều về.
         </Alert>
       </DialogContent>
@@ -768,35 +746,16 @@ export default function EmptyRouteDialog({ open, onClose, onSuccess, vehicles = 
           zIndex: 10,
         }}
       >
-        <Button
-          onClick={handleClose}
-          disabled={loading}
-          color="inherit"
-          sx={{
-            borderRadius: "12px",
-            textTransform: "none",
-            fontWeight: 700,
-            color: "var(--color-ink-muted)",
-          }}
-        >
+        <Button onClick={handleClose} disabled={loading} color="inherit">
           Hủy bỏ
         </Button>
 
         <Button
           type="submit"
           variant="contained"
+          size="large"
           disabled={loading}
           startIcon={loading ? <CircularProgress size={18} color="inherit" /> : <ArrowForwardIcon />}
-          sx={{
-            bgcolor: "var(--color-brand)",
-            "&:hover": { bgcolor: "var(--color-brand-hover)" },
-            borderRadius: "14px",
-            px: 3.5,
-            py: 1,
-            fontWeight: 800,
-            textTransform: "none",
-            boxShadow: "0 4px 14px rgba(27,73,101,0.25)",
-          }}
         >
           {loading ? "Đang xử lý..." : "Xác nhận khai báo chuyến"}
         </Button>
@@ -938,16 +897,18 @@ function GrabSearchBox({
             overflowY: "auto",
           }}
         >
-          <div className="p-2 border-b border-line text-[11px] font-bold text-ink-subtle uppercase tracking-wider flex items-center justify-between">
+          <div className="p-2 border-b border-line text-xs font-medium text-ink-muted flex items-center justify-between">
             <span>Địa điểm gợi ý ({suggestions.length})</span>
-            <span className="text-[10px] text-ink-subtle font-normal">Nhấp để chọn & ghim map</span>
+            <span className="text-[11px] text-ink-subtle font-normal">Nhấp để chọn &amp; ghim bản đồ</span>
           </div>
 
           {suggestions.map((item, idx) => (
-            <div
+            <button
               key={`${item.title}-${idx}`}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => handleSelect(item)}
-              className="px-3 py-2.5 hover:bg-surface-sunken cursor-pointer flex items-start gap-2.5 transition-colors border-b border-line last:border-b-0"
+              className="w-full text-left px-3 py-2.5 hover:bg-surface-sunken cursor-pointer flex items-start gap-2.5 transition-colors border-b border-line last:border-b-0"
             >
               <div className="w-7 h-7 rounded-lg bg-info-soft text-info flex items-center justify-center shrink-0 mt-0.5 border border-info-soft">
                 <PlaceIcon sx={{ fontSize: 16 }} />
@@ -967,7 +928,7 @@ function GrabSearchBox({
                   {item.subtitle}
                 </div>
               </div>
-            </div>
+            </button>
           ))}
         </div>
       )}

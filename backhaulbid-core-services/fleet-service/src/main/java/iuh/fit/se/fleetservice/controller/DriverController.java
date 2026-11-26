@@ -5,10 +5,16 @@ import iuh.fit.se.fleetservice.dto.CreateDriverRequest;
 import iuh.fit.se.fleetservice.dto.DriverResponse;
 import iuh.fit.se.fleetservice.dto.UpdateDriverRequest;
 import iuh.fit.se.fleetservice.dto.PublicDriverResponse;
+import iuh.fit.se.fleetservice.mapper.DriverMapper;
 import iuh.fit.se.fleetservice.service.DriverProfileService;
+import iuh.fit.se.fleetservice.service.FleetMediaClient;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.CacheControl;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -30,6 +36,18 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class DriverController {
     private final DriverProfileService driverProfileService;
+    private final DriverMapper driverMapper;
+    private final FleetMediaClient fleetMediaClient;
+
+    @GetMapping("/{driverId}/license-document")
+    public ResponseEntity<byte[]> readLicenseDocument(
+            @RequestHeader("X-User-Id") UUID accountId,
+            @RequestHeader("X-User-Role") String role,
+            @PathVariable UUID driverId
+    ) {
+        String url = driverProfileService.getAuthorizedLicenseImageUrl(accountId, role, driverId);
+        return FleetMediaClient.toInlineResponse(fleetMediaClient.fetch(url));
+    }
 
     @GetMapping("/mine")
     public List<DriverResponse> getMyDrivers(
@@ -38,9 +56,7 @@ public class DriverController {
             @RequestParam(required = false) VerificationStatus status
     ) {
         requireCarrierOrAdmin(role);
-        return driverProfileService.listMine(carrierId, status).stream()
-                .map(DriverResponse::from)
-                .toList();
+        return driverMapper.toResponses(driverProfileService.listMine(carrierId, status));
     }
 
     @GetMapping("/carrier/{carrierId}")
@@ -49,9 +65,7 @@ public class DriverController {
             @RequestHeader("X-User-Role") String role
     ) {
         requireShipperCarrierOrAdmin(role);
-        return driverProfileService.listMine(carrierId, null).stream()
-                .map(PublicDriverResponse::from)
-                .toList();
+        return driverMapper.toPublicResponses(driverProfileService.listMine(carrierId, null));
     }
 
     @PostMapping
@@ -62,23 +76,8 @@ public class DriverController {
     ) {
         requireCarrier(role);
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(DriverResponse.from(driverProfileService.create(carrierId, request)));
+                .body(driverMapper.toResponse(driverProfileService.create(carrierId, request)));
     }
-
-
-
-    @PostMapping("/bulk")
-    public ResponseEntity<List<DriverResponse>> createBulk(
-            @RequestHeader("X-User-Id") UUID carrierId,
-            @RequestHeader("X-User-Role") String role,
-            @RequestBody List<@Valid CreateDriverRequest> requests
-    ) {
-        requireCarrier(role);
-        return ResponseEntity.status(HttpStatus.CREATED)
-                .body(driverProfileService.createBulk(carrierId, requests).stream().map(DriverResponse::from).toList());
-    }
-
-
 
     @PatchMapping("/{driverId}")
     public DriverResponse update(
@@ -88,7 +87,7 @@ public class DriverController {
             @Valid @RequestBody UpdateDriverRequest request
     ) {
         requireCarrier(role);
-        return DriverResponse.from(driverProfileService.update(carrierId, driverId, request));
+        return driverMapper.toResponse(driverProfileService.update(carrierId, driverId, request));
     }
 
 

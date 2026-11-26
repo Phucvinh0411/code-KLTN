@@ -1,15 +1,18 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { ConflictException, Injectable, Optional } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { RedisCacheService } from '../../common/redis/redis-cache.service';
 import { AuctionService } from '../auction/auction.service';
 import { AuctionStatus } from '../../common/enums/auction-status.enum';
 import { AuctionType } from '../../common/enums/auction-type.enum';
 import { AuctionRegistrationService } from '../auction-registration/auction-registration.service';
+import { AccountVerificationClient } from '../../integrations/identity/account-verification.client';
 import { CarrierCoverageClient } from '../../integrations/identity/carrier-coverage.client';
-import { EkycVerificationClient } from '../../integrations/identity/ekyc-verification.client';
 import { ListBidsQueryDto } from './dto/list-bids-query.dto';
 import { PlaceBidDto } from './dto/place-bid.dto';
 import { Bid, BidDocument } from './schemas/bid.schema';
+import { toBidResponse, toBidResponses } from './bid.mapper';
 
 @Injectable()
 export class BidService {
@@ -21,18 +24,19 @@ export class BidService {
     private readonly auctionService: AuctionService,
     private readonly registrationService: AuctionRegistrationService,
     private readonly coverageClient: CarrierCoverageClient,
-    private readonly ekycClient: EkycVerificationClient,
+    private readonly verificationClient: AccountVerificationClient,
+    @Optional() private readonly redis?: RedisCacheService,
   ) {}
 
   async place(auctionId: string, carrierId: string, dto: PlaceBidDto) {
+    await this.verificationClient.assertVerified(carrierId);
     return this.withAuctionLock(auctionId, async () => {
-      await this.ekycClient.assertCarrierVerified(carrierId);
       const idempotencyKey = dto.idempotencyKey?.trim();
       if (idempotencyKey) {
         const existing = await this.bidModel
           .findOne({ auctionId, carrierId, idempotencyKey })
           .exec();
-        if (existing) return this.serialize(existing);
+        if (existing) return toBidResponse(existing);
       }
 
       const access = await this.registrationService.getAccess(
@@ -40,7 +44,9 @@ export class BidService {
         carrierId,
       );
       if (!access.canEnter) {
-        throw new ConflictException(`Carrier cannot bid: ${access.accessStatus}`);
+        throw new ConflictException(
+          `Carrier cannot bid: ${access.accessStatus}`,
+        );
       }
 
       const auction = await this.auctionService.findById(auctionId);
@@ -92,7 +98,10 @@ export class BidService {
           .findOne({ auctionId })
           .sort({ bidAmount: 1, bidTime: 1 })
           .exec();
-        if (currentLowest && amount >= Number(currentLowest.bidAmount.toString())) {
+        if (
+          currentLowest &&
+          amount >= Number(currentLowest.bidAmount.toString())
+        ) {
           throw new ConflictException(
             'Bid must be lower than the current lowest bid',
           );
@@ -115,7 +124,7 @@ export class BidService {
         bidTime: new Date(),
         idempotencyKey: idempotencyKey ?? null,
       });
-      return this.serialize(bid);
+      return toBidResponse(bid);
     });
   }
 
@@ -134,7 +143,9 @@ export class BidService {
     const skip = (query.page - 1) * query.pageSize;
     const ownBidCount =
       role === 'CARRIER'
-        ? await this.bidModel.countDocuments({ auctionId, carrierId: viewerId }).exec()
+        ? await this.bidModel
+            .countDocuments({ auctionId, carrierId: viewerId })
+            .exec()
         : null;
     const [items, totalItems] = await Promise.all([
       this.bidModel
@@ -146,7 +157,7 @@ export class BidService {
       this.bidModel.countDocuments(filter).exec(),
     ]);
     return {
-      data: items.map((item) => this.serialize(item)),
+      data: toBidResponses(items),
       pagination: {
         page: query.page,
         pageSize: query.pageSize,
@@ -170,24 +181,30 @@ export class BidService {
     this.auctionLocks.set(auctionId, queued);
 
     await previous;
+    const lockKey = `bidding:bid:lock:${auctionId}`;
+    const lockToken = randomUUID();
+    let redisAcquired = false;
     try {
+      for (let attempt = 0; attempt < 15; attempt++) {
+        redisAcquired =
+          (await this.redis?.tryAcquireLock(lockKey, lockToken, 5_000)) ?? true;
+        if (redisAcquired) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (!redisAcquired) {
+        throw new ConflictException(
+          'Auction is busy processing another bid, please retry',
+        );
+      }
       return await work();
     } finally {
+      if (redisAcquired) {
+        await this.redis?.releaseLock(lockKey, lockToken);
+      }
       release();
       if (this.auctionLocks.get(auctionId) === queued) {
         this.auctionLocks.delete(auctionId);
       }
     }
-  }
-
-  private serialize(bid: BidDocument) {
-    return {
-      id: bid._id,
-      auctionId: bid.auctionId,
-      carrierId: bid.carrierId,
-      bidAmount: bid.bidAmount.toString(),
-      bidTime: bid.bidTime,
-      idempotencyKey: bid.idempotencyKey ?? null,
-    };
   }
 }

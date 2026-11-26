@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import DialogActions from "@mui/material/DialogActions";
@@ -32,11 +32,15 @@ import {
 import {
   getAdminDriverReviews,
   getAdminVehicleReviews,
+  openDriverLicenseDocument,
+  openVehicleDocument,
   reviewAdminDriver,
   reviewAdminVehicle,
 } from "@/services/fleetApi";
+import { identityApi } from "@/services/identityApi";
 import { getApiErrorMessage } from "@/services/errorMessage";
 import { useGlobalNotification } from "@/components/common/NotificationPopup";
+import { shortId } from "@/lib/format";
 
 const STATUS_META = {
   PENDING: { label: "Chờ duyệt", tone: "warning" },
@@ -65,21 +69,44 @@ export default function FleetVerificationsPage() {
   const [tab, setTab] = useState("vehicles");
   const [status, setStatus] = useState("PENDING");
   const [rows, setRows] = useState([]);
+  const [accountNames, setAccountNames] = useState({});
   const [loading, setLoading] = useState(true);
   const [reviewing, setReviewing] = useState(null);
   const [detailRow, setDetailRow] = useState(null);
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const loadReviews = async () => {
+  const accountsLoadedRef = useRef(false);
+
+  const loadReviews = useCallback(async () => {
     setLoading(true);
     try {
-      const data =
+      const [data, accounts] = await Promise.all([
         tab === "vehicles"
-          ? await getAdminVehicleReviews(status)
-          : await getAdminDriverReviews(
-              status === "INACTIVE" ? "EXPIRED" : status,
-            );
+          ? getAdminVehicleReviews(status)
+          : getAdminDriverReviews(status === "INACTIVE" ? "EXPIRED" : status),
+        accountsLoadedRef.current
+          ? Promise.resolve(null)
+          : identityApi
+              .listAdminAccounts()
+              .then((res) => {
+                if (Array.isArray(res) && res.length > 0) {
+                  accountsLoadedRef.current = true;
+                }
+                return res;
+              })
+              .catch(() => null),
+      ]);
+      if (Array.isArray(accounts)) {
+        const map = {};
+        accounts.forEach((account) => {
+          if (account?.id) {
+            map[String(account.id)] =
+              account.companyName || account.fullName || account.phone || `Tài khoản #${shortId(account.id)}`;
+          }
+        });
+        setAccountNames(map);
+      }
       setRows(Array.isArray(data) ? data : []);
     } catch (loadError) {
       notify.error(
@@ -91,11 +118,28 @@ export default function FleetVerificationsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [notify, status, tab]);
 
   useEffect(() => {
     void loadReviews();
-  }, [notify, status, tab]);
+  }, [loadReviews]);
+
+  const getCarrierLabel = (carrierId) => {
+    if (!carrierId) return "—";
+    return accountNames[String(carrierId)] || `Chủ xe #${shortId(carrierId)}`;
+  };
+
+  const handleOpenDocument = async (loader) => {
+    try {
+      await loader();
+    } catch (error) {
+      if (error?.message === "POPUP_BLOCKED") {
+        notify.warning("Trình duyệt đang chặn cửa sổ bật lên. Vui lòng cho phép để xem tài liệu.");
+        return;
+      }
+      notify.error(getApiErrorMessage(error, "Không thể tải tài liệu đính kèm."));
+    }
+  };
 
   const changeTab = (nextTab) => {
     setTab(nextTab);
@@ -161,12 +205,12 @@ export default function FleetVerificationsPage() {
             <Tab
               value="vehicles"
               label="Phương tiện"
-              sx={{ textTransform: "none", fontWeight: 800 }}
+              sx={{ textTransform: "none", fontWeight: 700 }}
             />
             <Tab
               value="drivers"
               label="Tài xế"
-              sx={{ textTransform: "none", fontWeight: 800 }}
+              sx={{ textTransform: "none", fontWeight: 700 }}
             />
           </Tabs>
         </Box>
@@ -193,14 +237,14 @@ export default function FleetVerificationsPage() {
                 <TableRow>
                   {[
                     "Đối tượng",
-                    "Chủ xe",
-                    "Thông tin",
+                    tab === "vehicles" ? "Chủ xe" : "Chủ xe / SĐT tài xế",
+                    tab === "vehicles" ? "Thông tin" : "Số GPLX",
                     "Trạng thái",
                     "Thao tác",
                   ].map((label) => (
                     <TableCell
                       key={label}
-                      sx={{ fontWeight: 800, color: "text.secondary" }}
+                      sx={{ fontWeight: 700, color: "text.secondary" }}
                       align={label === "Thao tác" ? "right" : "left"}
                     >
                       {label}
@@ -222,18 +266,20 @@ export default function FleetVerificationsPage() {
                           fontFamily: "monospace",
                         }}
                       >
-                        {row.id}
+                        #{shortId(row.id)}
                       </Typography>
-                    </TableCell>
-                    <TableCell
-                      sx={{ fontFamily: "monospace", fontSize: "0.75rem" }}
-                    >
-                      {tab === "vehicles" ? row.carrierId : "—"}
                     </TableCell>
                     <TableCell>
                       {tab === "vehicles"
-                        ? `${row.vehicleType || "Chưa rõ"} · ${row.payloadCapacity || "?"} tấn`
-                        : `${row.phone || "Chưa có SĐT"} · GPLX ${row.licenseNumber || "?"}`}
+                        ? getCarrierLabel(row.carrierId)
+                        : row.carrierId
+                          ? getCarrierLabel(row.carrierId)
+                          : (row.phone || "—")}
+                    </TableCell>
+                    <TableCell>
+                      {tab === "vehicles"
+                        ? `${row.vehicleTypeLabel || row.vehicleType || "Chưa rõ"} · ${row.capacity || "?"}`
+                        : `GPLX ${row.licenseNumber || "?"}`}
                     </TableCell>
                     <TableCell>
                       <ReviewStatusChip status={row.status} />
@@ -293,7 +339,7 @@ export default function FleetVerificationsPage() {
         maxWidth="sm"
       >
         <DialogTitle
-          sx={{ borderBottom: "1px solid var(--color-line)", fontWeight: 800 }}
+          sx={{ borderBottom: "1px solid var(--color-line)", fontWeight: 700 }}
         >
           Hồ sơ {tab === "vehicles" ? "phương tiện" : "tài xế"}
         </DialogTitle>
@@ -325,7 +371,7 @@ export default function FleetVerificationsPage() {
                 <strong>
                   {tab === "vehicles" ? "Chủ xe" : "Số điện thoại"}:
                 </strong>{" "}
-                {tab === "vehicles" ? detailRow.carrierId : detailRow.phone}
+                {tab === "vehicles" ? getCarrierLabel(detailRow.carrierId) : detailRow.phone}
               </Typography>
               {tab === "vehicles" ? (
                 <Box
@@ -338,10 +384,12 @@ export default function FleetVerificationsPage() {
                   {[
                     {
                       label: "Cà vẹt / đăng ký",
+                      kind: "registration",
                       url: detailRow.registrationDocumentUrl,
                     },
                     {
                       label: "Đăng kiểm",
+                      kind: "inspection",
                       url: detailRow.inspectionDocumentUrl,
                     },
                   ].map((document) => (
@@ -361,11 +409,8 @@ export default function FleetVerificationsPage() {
                       </Typography>
                       {document.url ? (
                         <Button
-                          component="a"
-                          href={document.url}
-                          target="_blank"
-                          rel="noreferrer"
                           size="small"
+                          onClick={() => handleOpenDocument(() => openVehicleDocument(detailRow.id, document.kind))}
                         >
                           Mở tài liệu
                         </Button>
@@ -392,11 +437,8 @@ export default function FleetVerificationsPage() {
                   </Typography>
                   {detailRow.licenseImageUrl ? (
                     <Button
-                      component="a"
-                      href={detailRow.licenseImageUrl}
-                      target="_blank"
-                      rel="noreferrer"
                       size="small"
+                      onClick={() => handleOpenDocument(() => openDriverLicenseDocument(detailRow.id))}
                     >
                       Mở tài liệu
                     </Button>
@@ -426,7 +468,7 @@ export default function FleetVerificationsPage() {
         fullWidth
         maxWidth="sm"
       >
-        <DialogTitle sx={{ fontWeight: 800 }}>
+        <DialogTitle sx={{ fontWeight: 700 }}>
           {reviewing?.decision === "APPROVE" ? "Duyệt hồ sơ" : "Từ chối hồ sơ"}
         </DialogTitle>
         <DialogContent>

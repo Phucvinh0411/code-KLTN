@@ -3,6 +3,7 @@ package iuh.fit.se.contractservice.service;
 import iuh.fit.se.contractservice.domain.entity.TrackingLog;
 import iuh.fit.se.contractservice.domain.entity.Trip;
 import iuh.fit.se.contractservice.domain.enums.AccountRole;
+import iuh.fit.se.contractservice.domain.enums.ContractStatus;
 import iuh.fit.se.contractservice.domain.enums.TripStatus;
 import iuh.fit.se.contractservice.dto.CreateTrackingRequest;
 import iuh.fit.se.contractservice.dto.AssignDriverRequest;
@@ -14,6 +15,7 @@ import iuh.fit.se.contractservice.domain.entity.DeliveryProof;
 import iuh.fit.se.contractservice.domain.entity.TripLocationUpdate;
 import iuh.fit.se.contractservice.domain.entity.TripLocationSource;
 import iuh.fit.se.contractservice.domain.enums.JourneyEventType;
+import iuh.fit.se.contractservice.repository.ContractRepository;
 import iuh.fit.se.contractservice.repository.JourneyEventRepository;
 import iuh.fit.se.contractservice.repository.DeliveryProofRepository;
 import iuh.fit.se.contractservice.repository.TripLocationUpdateRepository;
@@ -22,6 +24,7 @@ import iuh.fit.se.contractservice.repository.TripRepository;
 import iuh.fit.se.contractservice.repository.TripDelaySettlementRepository;
 import iuh.fit.se.contractservice.repository.TripTrackingSessionRepository;
 import iuh.fit.se.contractservice.dto.TripDelaySettlementResponse;
+import iuh.fit.se.contractservice.mapper.TripMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -39,7 +42,11 @@ import iuh.fit.se.contractservice.dto.CreateTripLocationRequest;
 @Service
 @RequiredArgsConstructor
 public class TripService {
+    static final String UNSIGNED_CONTRACT_MESSAGE =
+            "Hợp đồng vận chuyển chưa được hai bên ký xác nhận. Vui lòng hoàn tất ký hợp đồng trước khi thực hiện thao tác này.";
+
     private final TripRepository tripRepository;
+    private final ContractRepository contractRepository;
     private final TrackingLogRepository trackingLogRepository;
     private final JourneyEventRepository journeyEventRepository;
     private final DeliveryProofRepository deliveryProofRepository;
@@ -51,6 +58,7 @@ public class TripService {
     private final DriverGrantService driverGrantService;
     private final DriverAccessPolicy driverAccessPolicy;
     private final TripHandoverService tripHandoverService;
+    private final TripMapper tripMapper;
 
     @Transactional(readOnly = true)
     public List<Trip> list(UUID accountId, AccountRole role, TripStatus status) {
@@ -78,6 +86,7 @@ public class TripService {
         if (role != AccountRole.CARRIER && role != AccountRole.ADMIN) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Carrier or admin role required");
         }
+        requireActorAllowedForStatus(role, request.status());
         Trip trip = lock(accountId, role, tripId);
         if (!isAllowedTransition(trip.getStatus(), request.status())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
@@ -98,6 +107,8 @@ public class TripService {
         if (request.status() == TripStatus.CANCELLED || request.status() == TripStatus.COMPLETED) {
             lateDeliveryService.processTripAndReleaseIfClosed(saved);
         }
+        saved.getTrackingLogs().size();
+        if (saved.getContract() != null) saved.getContract().getStatus();
         return saved;
     }
 
@@ -114,6 +125,7 @@ public class TripService {
         Trip trip = tripRepository.findByIdForUpdate(tripId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Trip not found"));
         ensureAccess(trip, accountId, role);
+        requireSignedContract(tripId);
         if (trip.getStatus() != TripStatus.WAITING_PICKUP) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Only waiting trips can be assigned");
         }
@@ -135,6 +147,7 @@ public class TripService {
         Trip trip = tripRepository.findByIdForUpdate(tripId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Trip not found"));
         ensureAccess(trip, accountId, role);
+        requireSignedContract(tripId);
         if (trip.getDriverId() == null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Chuyến chưa được phân công tài xế");
         }
@@ -161,6 +174,7 @@ public class TripService {
         if (role != AccountRole.CARRIER && role != AccountRole.ADMIN) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Carrier or admin role required");
         }
+        requireActorAllowedForStatus(role, request.status());
         Trip trip = lock(accountId, role, tripId);
         if (trip.getStatus() == TripStatus.CANCELLED || trip.getStatus() == TripStatus.COMPLETED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Cannot add tracking to a closed trip");
@@ -196,10 +210,7 @@ public class TripService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Cannot update a closed trip");
         }
         TripStatus nextStatus = request.status() == null ? trip.getStatus() : request.status();
-        if (role == AccountRole.DRIVER
-                && (nextStatus == TripStatus.COMPLETED || nextStatus == TripStatus.CANCELLED)) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Driver cannot complete or cancel a trip");
-        }
+        requireActorAllowedForStatus(role, nextStatus);
         if (nextStatus != trip.getStatus() && !isAllowedTransition(trip.getStatus(), nextStatus)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "Invalid trip status transition from " + trip.getStatus() + " to " + nextStatus);
@@ -209,6 +220,11 @@ public class TripService {
         }
         if (request.eventType() == JourneyEventType.ADMIN_OVERRIDE && role != AccountRole.ADMIN) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Admin role required for override");
+        }
+        if (request.eventType() == JourneyEventType.DELIVERY_ACCEPTED
+                && role != AccountRole.SHIPPER && role != AccountRole.ADMIN) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "Only shipper or admin can confirm delivery completion");
         }
         if (role == AccountRole.SHIPPER
                 && (request.eventType() != JourneyEventType.DELIVERY_ACCEPTED || nextStatus != TripStatus.COMPLETED)) {
@@ -319,26 +335,37 @@ public class TripService {
         Trip cancelled = tripRepository.save(trip);
         lateDeliveryService.releaseRemainingDepositIfClosed(cancelled);
         lateDeliveryService.notifyLateCancellation(cancelled);
+        cancelled.getTrackingLogs().size();
+        if (cancelled.getContract() != null) cancelled.getContract().getStatus();
         return cancelled;
     }
 
     @Transactional(readOnly = true)
     public List<TripDelaySettlementResponse> delaySettlements(UUID accountId, AccountRole role, UUID tripId) {
         Trip trip = get(accountId, role, tripId);
-        return tripDelaySettlementRepository.findByTripIdOrderByTierAsc(trip.getId()).stream()
-                .map(TripDelaySettlementResponse::from).toList();
+        return tripMapper.toDelaySettlementResponses(
+                tripDelaySettlementRepository.findByTripIdOrderByTierAsc(trip.getId()));
     }
 
     @Transactional(readOnly = true)
     public List<TripDelaySettlementResponse> allDelaySettlementsForAdmin() {
-        return lateDeliveryService.listForAdmin().stream().map(TripDelaySettlementResponse::from).toList();
+        return tripMapper.toDelaySettlementResponses(lateDeliveryService.listForAdmin());
     }
 
     private Trip lock(UUID accountId, AccountRole role, UUID tripId) {
         Trip trip = tripRepository.findByIdForUpdate(tripId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Trip not found"));
         ensureAccess(trip, accountId, role, DriverAccessPolicy.Mode.WRITE);
+        requireSignedContract(tripId);
         return trip;
+    }
+
+    private void requireSignedContract(UUID tripId) {
+        contractRepository.findByTripId(tripId)
+                .filter(contract -> contract.getStatus() != ContractStatus.SIGNED)
+                .ifPresent(contract -> {
+                    throw new ResponseStatusException(HttpStatus.CONFLICT, UNSIGNED_CONTRACT_MESSAGE);
+                });
     }
 
     private void stopTrackingIfClosed(Trip trip) {
@@ -359,6 +386,17 @@ public class TripService {
                 || (role == AccountRole.SHIPPER && accountId.equals(trip.getShipperId()));
         if (!allowed) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You do not have access to this trip");
+        }
+    }
+
+    private void requireActorAllowedForStatus(AccountRole role, TripStatus nextStatus) {
+        if (role == AccountRole.CARRIER && nextStatus == TripStatus.COMPLETED) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "Carrier cannot complete a trip; shipper confirmation required");
+        }
+        if (role == AccountRole.DRIVER
+                && (nextStatus == TripStatus.COMPLETED || nextStatus == TripStatus.CANCELLED)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Driver cannot complete or cancel a trip");
         }
     }
 

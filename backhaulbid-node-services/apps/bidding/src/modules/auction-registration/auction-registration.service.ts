@@ -25,11 +25,17 @@ import {
   CarrierReputationClient,
   MINIMUM_AUCTION_REPUTATION_SCORE,
 } from '../../integrations/fleet/carrier-reputation.client';
-import { EkycVerificationClient } from '../../integrations/identity/ekyc-verification.client';
+import { CarrierVehicleClient } from '../../integrations/fleet/carrier-vehicle.client';
+import {
+  AccountVerificationClient,
+  AccountVerificationStatus,
+} from '../../integrations/identity/account-verification.client';
+import { CarrierCoverageClient } from '../../integrations/identity/carrier-coverage.client';
 import {
   AuctionRegistration,
   AuctionRegistrationDocument,
 } from './schemas/auction-registration.schema';
+import { toAuctionRegistrationResponse } from './auction-registration.mapper';
 
 type AuctionView = Awaited<ReturnType<AuctionService['findById']>>;
 
@@ -41,7 +47,9 @@ export class AuctionRegistrationService {
     private readonly auctionService: AuctionService,
     private readonly walletClient: WalletClient,
     private readonly reputationClient: CarrierReputationClient,
-    private readonly ekycClient: EkycVerificationClient,
+    private readonly vehicleClient: CarrierVehicleClient,
+    private readonly verificationClient: AccountVerificationClient,
+    private readonly coverageClient: CarrierCoverageClient,
   ) {}
 
   async register(
@@ -49,9 +57,12 @@ export class AuctionRegistrationService {
     carrierId: string,
     dto: RegisterAuctionDto,
   ) {
+    await this.verificationClient.assertVerified(carrierId);
     const auction = await this.auctionService.findById(auctionId);
     this.assertRegistrationOpen(auction);
-    await this.ekycClient.assertCarrierVerified(carrierId);
+    if (auction.requireCarrierCoverage === true) {
+      await this.coverageClient.assertEligible(carrierId);
+    }
     const reputationScore = await this.reputationClient.getScore(carrierId);
     if (reputationScore < MINIMUM_AUCTION_REPUTATION_SCORE) {
       throw new ForbiddenException({
@@ -71,11 +82,23 @@ export class AuctionRegistrationService {
           'Carrier registration was cancelled and cannot be reused',
         );
       }
-      if (existing.paymentStatus === RegistrationPaymentStatus.COMPLETED) {
-        return this.serialize(existing, auction);
+      if (existing.paymentStatus === RegistrationPaymentStatus.COMPENSATING) {
+        throw new ConflictException(
+          'Registration deposit compensation is still in progress. Please retry in a moment.',
+        );
       }
+      if (existing.paymentStatus === RegistrationPaymentStatus.COMPLETED) {
+        return toAuctionRegistrationResponse(existing, auction);
+      }
+      await this.vehicleClient.assertVerifiedVehicle(carrierId, dto.vehicleId);
+      if (existing.vehicleId !== dto.vehicleId) {
+        existing.vehicleId = dto.vehicleId;
+      }
+      await this.prepareRegistrationForRetry(existing, auction);
       return this.completePayment(existing, auction);
     }
+
+    await this.vehicleClient.assertVerifiedVehicle(carrierId, dto.vehicleId);
 
     const registration = await this.registrationModel.create({
       auctionId,
@@ -96,12 +119,7 @@ export class AuctionRegistrationService {
       idempotencyKey: dto.idempotencyKey,
     });
 
-    try {
-      return await this.completePayment(registration, auction);
-    } catch (error) {
-      await this.markFailed(registration, error);
-      throw error;
-    }
+    return this.completePayment(registration, auction);
   }
 
   async retryPayment(
@@ -111,7 +129,7 @@ export class AuctionRegistrationService {
     dto: RetryPaymentDto,
   ) {
     void dto;
-    await this.ekycClient.assertCarrierVerified(carrierId);
+    await this.verificationClient.assertVerified(carrierId);
     const auction = await this.auctionService.findById(auctionId);
     const registration = await this.registrationModel
       .findOne({ _id: registrationId, auctionId, carrierId })
@@ -120,79 +138,138 @@ export class AuctionRegistrationService {
     if (registration.status === RegistrationStatus.CANCELLED) {
       throw new ConflictException('Registration is cancelled');
     }
+    if (registration.paymentStatus === RegistrationPaymentStatus.COMPENSATING) {
+      throw new ConflictException(
+        'Registration deposit compensation is still in progress. Please retry in a moment.',
+      );
+    }
     if (registration.paymentStatus === RegistrationPaymentStatus.COMPLETED) {
-      return this.serialize(registration, auction);
+      return toAuctionRegistrationResponse(registration, auction);
     }
     if (new Date() >= auction.startTime) {
       throw new ConflictException(
         'Payment retry is closed after the auction starts',
       );
     }
+    if (auction.requireCarrierCoverage === true) {
+      await this.coverageClient.assertEligible(carrierId);
+    }
+    await this.vehicleClient.assertVerifiedVehicle(
+      carrierId,
+      registration.vehicleId,
+    );
+    await this.prepareRegistrationForRetry(registration, auction);
     return this.completePayment(registration, auction);
   }
 
   async getAccess(auctionId: string, carrierId: string) {
-    const [auction, ekycVerified, reputationScore] = await Promise.all([
+    const [auction, verification, reputationScore] = await Promise.all([
       this.auctionService.findById(auctionId),
-      this.ekycClient.isVerified(carrierId),
+      this.verificationClient.getStatus(carrierId),
       this.reputationClient.getScore(carrierId),
     ]);
+    const isAccountVerified =
+      verification.ekycVerified &&
+      verification.businessVerified &&
+      verification.fullyVerified;
+    const coverageEligible =
+      isAccountVerified && auction.requireCarrierCoverage === true
+        ? await this.coverageClient.isEligible(carrierId)
+        : true;
+    const canQueryRegistration =
+      isAccountVerified &&
+      coverageEligible &&
+      reputationScore >= MINIMUM_AUCTION_REPUTATION_SCORE;
+    const registration = canQueryRegistration
+      ? await this.registrationModel.findOne({ auctionId, carrierId }).exec()
+      : null;
+
+    return this.computeAccessForAuction(
+      auction,
+      registration,
+      verification,
+      reputationScore,
+      coverageEligible,
+    );
+  }
+
+  async getBatchAccess(auctionIds: string[], carrierId: string) {
+    const uniqueIds = Array.from(
+      new Set(auctionIds.map((id) => id.trim()).filter((id) => id.length > 0)),
+    ).slice(0, 200);
+    if (uniqueIds.length === 0) return {};
+
+    const [auctions, verification, reputationScore] = await Promise.all([
+      this.auctionService.findByIds(uniqueIds),
+      this.verificationClient.getStatus(carrierId),
+      this.reputationClient.getScore(carrierId),
+    ]);
+    if (auctions.length === 0) return {};
+
+    const validIds = auctions.map((auction) => String(auction.id));
+    const isAccountVerified =
+      verification.ekycVerified &&
+      verification.businessVerified &&
+      verification.fullyVerified;
+    const needsCoverage =
+      isAccountVerified &&
+      auctions.some((auction) => auction.requireCarrierCoverage === true);
+
+    const [coverageEligible, registrations] = await Promise.all([
+      needsCoverage
+        ? this.coverageClient.isEligible(carrierId)
+        : Promise.resolve(true),
+      this.registrationModel
+        .find({ auctionId: { $in: validIds }, carrierId })
+        .exec(),
+    ]);
+
+    const registrationByAuctionId = new Map<
+      string,
+      AuctionRegistrationDocument
+    >();
+    for (const reg of registrations) {
+      registrationByAuctionId.set(reg.auctionId, reg);
+    }
+
+    const result: Record<
+      string,
+      ReturnType<AuctionRegistrationService['computeAccessForAuction']>
+    > = {};
+    for (const auction of auctions) {
+      const id = String(auction.id);
+      result[id] = this.computeAccessForAuction(
+        auction,
+        registrationByAuctionId.get(id) ?? null,
+        verification,
+        reputationScore,
+        coverageEligible,
+      );
+    }
+    return result;
+  }
+
+  private computeAccessForAuction(
+    auction: AuctionView,
+    registration: AuctionRegistrationDocument | null,
+    verification: AccountVerificationStatus,
+    reputationScore: number,
+    coverageEligible: boolean,
+  ) {
     const reputation = {
-      ekycVerified,
+      ekycVerified: verification.ekycVerified,
+      businessVerified: verification.businessVerified,
       reputationScore,
       minimumReputationScore: MINIMUM_AUCTION_REPUTATION_SCORE,
     };
-    if (!ekycVerified) {
-      return {
-        canRegister: false,
-        canEnter: false,
-        accessStatus: 'EKYC_REQUIRED',
-        ...reputation,
-      };
-    }
-    if (reputationScore < MINIMUM_AUCTION_REPUTATION_SCORE) {
-      return {
-        canRegister: false,
-        canEnter: false,
-        accessStatus: 'REPUTATION_TOO_LOW',
-        ...reputation,
-      };
-    }
-    const registration = await this.registrationModel
-      .findOne({ auctionId, carrierId })
-      .exec();
-    if (!registration) {
-      return {
-        ...reputation,
-        canRegister: auction.registrationOpen,
-        canEnter: false,
-        accessStatus: auction.registrationOpen
-          ? 'REGISTRATION_REQUIRED'
-          : 'REGISTRATION_CLOSED',
-        startTime: auction.startTime,
-        registrationEndTime: auction.registrationEndTime,
-      };
-    }
 
-    if (registration.status === RegistrationStatus.CANCELLED) {
+    if (registration?.status === RegistrationStatus.CANCELLED) {
       return {
         ...reputation,
         canRegister: false,
         canEnter: false,
         accessStatus: 'REGISTRATION_CANCELLED',
         registrationId: registration._id,
-      };
-    }
-
-    if (registration.paymentStatus !== RegistrationPaymentStatus.COMPLETED) {
-      return {
-        ...reputation,
-        canRegister: false,
-        canEnter: false,
-        accessStatus: 'PAYMENT_INCOMPLETE',
-        paymentStatus: registration.paymentStatus,
-        registrationId: registration._id,
-        startTime: auction.startTime,
       };
     }
 
@@ -220,6 +297,64 @@ export class AuctionRegistrationService {
         accessStatus: 'AUCTION_COMPLETED',
       };
     }
+
+    if (!verification.ekycVerified) {
+      return {
+        canRegister: false,
+        canEnter: false,
+        accessStatus: 'EKYC_REQUIRED',
+        ...reputation,
+      };
+    }
+    if (!verification.businessVerified || !verification.fullyVerified) {
+      return {
+        canRegister: false,
+        canEnter: false,
+        accessStatus: 'ACCOUNT_VERIFICATION_REQUIRED',
+        ...reputation,
+      };
+    }
+    if (auction.requireCarrierCoverage === true && !coverageEligible) {
+      return {
+        canRegister: false,
+        canEnter: false,
+        accessStatus: 'CARRIER_COVERAGE_REQUIRED',
+        ...reputation,
+      };
+    }
+    if (reputationScore < MINIMUM_AUCTION_REPUTATION_SCORE) {
+      return {
+        canRegister: false,
+        canEnter: false,
+        accessStatus: 'REPUTATION_TOO_LOW',
+        ...reputation,
+      };
+    }
+    if (!registration) {
+      return {
+        ...reputation,
+        canRegister: auction.registrationOpen,
+        canEnter: false,
+        accessStatus: auction.registrationOpen
+          ? 'REGISTRATION_REQUIRED'
+          : 'REGISTRATION_CLOSED',
+        startTime: auction.startTime,
+        registrationEndTime: auction.registrationEndTime,
+      };
+    }
+
+    if (registration.paymentStatus !== RegistrationPaymentStatus.COMPLETED) {
+      return {
+        ...reputation,
+        canRegister: false,
+        canEnter: false,
+        accessStatus: 'PAYMENT_INCOMPLETE',
+        paymentStatus: registration.paymentStatus,
+        registrationId: registration._id,
+        startTime: auction.startTime,
+      };
+    }
+
     if (now < auction.startTime) {
       return {
         ...reputation,
@@ -261,7 +396,7 @@ export class AuctionRegistrationService {
         );
         const access = await this.getAccess(registration.auctionId, carrierId);
         return {
-          registration: this.serialize(registration, auction),
+          registration: toAuctionRegistrationResponse(registration, auction),
           auction,
           access,
         };
@@ -286,7 +421,7 @@ export class AuctionRegistrationService {
       .exec();
     if (!registration) throw new NotFoundException('Registration not found');
     if (registration.status === RegistrationStatus.CANCELLED) {
-      return this.serialize(registration, auction);
+      return toAuctionRegistrationResponse(registration, auction);
     }
 
     if (
@@ -301,7 +436,7 @@ export class AuctionRegistrationService {
     }
     registration.status = RegistrationStatus.CANCELLED;
     await registration.save();
-    return this.serialize(registration, auction);
+    return toAuctionRegistrationResponse(registration, auction);
   }
 
   async releaseLoserDeposits(auctionId: string, winningCarrierId?: string) {
@@ -339,10 +474,41 @@ export class AuctionRegistrationService {
     };
   }
 
+  private async prepareRegistrationForRetry(
+    registration: AuctionRegistrationDocument,
+    auction: AuctionView,
+  ): Promise<void> {
+    if (registration.paymentStatus === RegistrationPaymentStatus.FAILED) {
+      registration.paymentAttempt = (registration.paymentAttempt ?? 0) + 1;
+      registration.paymentStatus = RegistrationPaymentStatus.PENDING;
+      registration.paymentErrorCode = null;
+      if (
+        auction.isDepositRequired &&
+        registration.depositStatus !== DepositStatus.LOCKED
+      ) {
+        registration.depositStatus = DepositStatus.PENDING;
+        registration.depositHoldId = null;
+      }
+      if (registration.participationFeeStatus !== ParticipationFeeStatus.PAID) {
+        registration.participationFeeStatus = ParticipationFeeStatus.PENDING;
+        registration.participationFeeTransactionId = null;
+      }
+      await registration.save();
+    } else if (registration.isModified?.('vehicleId')) {
+      await registration.save();
+    }
+  }
+
   private async completePayment(
     registration: AuctionRegistrationDocument,
     auction: AuctionView,
   ) {
+    const attempt = registration.paymentAttempt ?? 0;
+    const keySuffix = attempt > 0 ? `:${attempt}` : '';
+    const depositHoldKey = `${registration._id}:deposit:hold${keySuffix}`;
+    const depositReleaseKey = `${registration._id}:deposit:release${keySuffix}`;
+    const feeChargeKey = `${registration._id}:fee:charge${keySuffix}`;
+
     try {
       const depositAmount = auction.depositAmount;
       if (
@@ -355,7 +521,7 @@ export class AuctionRegistrationService {
           registrationId: registration._id,
           amount: depositAmount,
           purpose: 'AUCTION_DEPOSIT',
-          idempotencyKey: `${registration._id}:deposit:hold`,
+          idempotencyKey: depositHoldKey,
         });
         registration.depositStatus = DepositStatus.LOCKED;
         registration.depositHoldId = hold.holdId ?? hold.transactionId;
@@ -370,7 +536,7 @@ export class AuctionRegistrationService {
           registrationId: registration._id,
           amount: auction.participationFeeAmount,
           purpose: 'AUCTION_PARTICIPATION_FEE',
-          idempotencyKey: `${registration._id}:fee:charge`,
+          idempotencyKey: feeChargeKey,
         });
         registration.participationFeeStatus = ParticipationFeeStatus.PAID;
         registration.participationFeeTransactionId = charge.transactionId;
@@ -380,8 +546,9 @@ export class AuctionRegistrationService {
       registration.paymentStatus = RegistrationPaymentStatus.COMPLETED;
       registration.paymentErrorCode = null;
       await registration.save();
-      return this.serialize(registration, auction);
+      return toAuctionRegistrationResponse(registration, auction);
     } catch (error) {
+      let compensationPending = false;
       if (
         registration.depositStatus === DepositStatus.LOCKED &&
         registration.depositHoldId
@@ -391,14 +558,47 @@ export class AuctionRegistrationService {
         try {
           await this.walletClient.release(
             registration.depositHoldId,
-            `${registration._id}:deposit:release`,
+            depositReleaseKey,
           );
           registration.depositStatus = DepositStatus.REFUNDED;
         } catch {
+          compensationPending = true;
           registration.paymentErrorCode = 'DEPOSIT_COMPENSATION_PENDING';
         }
       }
-      await this.markFailed(registration, error);
+
+      let feeCompensationPending = false;
+      if (registration.participationFeeStatus === ParticipationFeeStatus.PAID) {
+        const refundKey = registration.participationFeeTransactionId
+          ? `${registration._id}:fee:refund:${registration.participationFeeTransactionId}`
+          : `${registration._id}:fee:refund${keySuffix}`;
+        const feeAmount =
+          registration.participationFeeAmount?.toString() ||
+          auction.participationFeeAmount;
+        try {
+          await this.walletClient.refund(registration.carrierId, {
+            auctionId: registration.auctionId,
+            registrationId: registration._id,
+            amount: feeAmount,
+            purpose: 'AUCTION_PARTICIPATION_FEE_REFUND',
+            idempotencyKey: refundKey,
+          });
+          registration.participationFeeStatus =
+            ParticipationFeeStatus.COMPENSATED;
+        } catch {
+          feeCompensationPending = true;
+          if (!compensationPending) {
+            registration.paymentErrorCode =
+              'PARTICIPATION_FEE_COMPENSATION_PENDING';
+          }
+        }
+      }
+
+      await this.markFailed(
+        registration,
+        error,
+        compensationPending || feeCompensationPending,
+      );
       throw this.mapWalletError(error);
     }
   }
@@ -406,16 +606,20 @@ export class AuctionRegistrationService {
   private async markFailed(
     registration: AuctionRegistrationDocument,
     error: unknown,
+    preserveCompensationCode = false,
   ) {
     registration.paymentStatus = RegistrationPaymentStatus.FAILED;
-    registration.participationFeeStatus =
-      registration.participationFeeStatus === ParticipationFeeStatus.PAID
-        ? ParticipationFeeStatus.COMPENSATED
-        : ParticipationFeeStatus.FAILED;
-    registration.paymentErrorCode =
-      error instanceof WalletClientError
-        ? `WALLET_${error.statusCode ?? 'ERROR'}`
-        : 'PAYMENT_FAILED';
+    if (
+      registration.participationFeeStatus === ParticipationFeeStatus.PENDING
+    ) {
+      registration.participationFeeStatus = ParticipationFeeStatus.FAILED;
+    }
+    if (!preserveCompensationCode) {
+      registration.paymentErrorCode =
+        error instanceof WalletClientError
+          ? `WALLET_${error.statusCode ?? 'ERROR'}`
+          : 'PAYMENT_FAILED';
+    }
     await registration.save();
   }
 
@@ -433,7 +637,18 @@ export class AuctionRegistrationService {
 
   private assertRegistrationOpen(auction: AuctionView) {
     const now = new Date();
-    if (!auction.registrationOpen || now >= auction.registrationEndTime) {
+    const registrationStartTime = auction.registrationStartTime
+      ? new Date(auction.registrationStartTime)
+      : null;
+    if (registrationStartTime && now < registrationStartTime) {
+      throw new ConflictException(
+        'Registration for this auction has not started yet',
+      );
+    }
+    if (
+      !auction.registrationOpen ||
+      now >= new Date(auction.registrationEndTime)
+    ) {
       throw new ConflictException('Registration for this auction is closed');
     }
     if (
@@ -451,29 +666,5 @@ export class AuctionRegistrationService {
       throw new ConflictException('Auction deposit configuration is invalid');
     }
     return auction.depositAmount;
-  }
-
-  private serialize(
-    registration: AuctionRegistrationDocument,
-    auction: AuctionView,
-  ) {
-    return {
-      id: registration._id,
-      auctionId: registration.auctionId,
-      carrierId: registration.carrierId,
-      vehicleId: registration.vehicleId,
-      status: registration.status,
-      paymentStatus: registration.paymentStatus,
-      depositStatus: registration.depositStatus,
-      participationFeeStatus: registration.participationFeeStatus,
-      participationFeeAmount: registration.participationFeeAmount.toString(),
-      depositAmount: registration.depositAmount?.toString() ?? null,
-      depositHoldId: registration.depositHoldId,
-      participationFeeTransactionId: registration.participationFeeTransactionId,
-      paymentErrorCode: registration.paymentErrorCode,
-      startTime: auction.startTime,
-      registeredAt: registration.registeredAt ?? registration.createdAt,
-      updatedAt: registration.updatedAt,
-    };
   }
 }

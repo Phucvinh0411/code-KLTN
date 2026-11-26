@@ -31,6 +31,7 @@ import PageHeader from "@/components/common/PageHeader";
 import StatCard from "@/components/common/StatCard";
 import { statisticsApi } from "@/services/statisticsApi";
 import { STAT_RANGE_OPTIONS, buildStatisticsRange, formatStatisticCount, formatStatisticCurrency, statusRows, validateCustomStatisticsRange } from "@/services/statisticsPresentation";
+import { TRANSACTION_TYPE_LABELS } from "@/services/walletFormatters";
 import { getApiErrorMessage } from "@/services/errorMessage";
 import { tokens } from "@/theme/theme";
 
@@ -44,7 +45,9 @@ const CUSTOM_RANGE_ERROR = {
   "max-range-exceeded": "Khoảng tùy chỉnh tối đa là 24 tháng.",
 };
 const STATUS_LABEL = {
-  PENDING: "Chờ mở", OPEN: "Đang mở", COMPLETED: "Đã kết thúc", CANCELLED: "Đã hủy",
+  PENDING: "Chờ mở", OPEN: "Đang mở", PROCESSING: "Đang xử lý", RESOLVED: "Đã giải quyết",
+  COMPLETED: "Đã kết thúc", CANCELLED: "Đã hủy", DISMISSED: "Từ chối",
+  SHIPPER_WIN: "Chủ hàng thắng", CARRIER_WIN: "Chủ xe thắng", BOTH: "Hai bên thỏa thuận",
   WAITING_PICKUP: "Chờ lấy hàng", PICKED_UP: "Đã lấy hàng", IN_TRANSIT: "Đang vận chuyển",
   DELIVERED: "Đã giao", SIGNED: "Đã ký", DRAFT: "Bản nháp", WAITING_SIGNATURE: "Chờ ký",
   EXPIRED: "Hết hạn", ACTIVE: "Đang hoạt động", INACTIVE: "Ngừng hoạt động", BLOCKED: "Đã khóa",
@@ -83,13 +86,13 @@ function SourcePanel({ title, source, retry, children }) {
   return <Box component="section" aria-label={title}>{children(source.data)}</Box>;
 }
 
-function StatusTable({ title, statuses }) {
+function StatusTable({ title, statuses, labelOverrides, columnLabel = "Trạng thái" }) {
   const rows = statusRows(statuses);
   return <AppCard component="section" sx={{ p: { xs: 1.5, sm: 2.5 } }}>
     <Typography component="h2" sx={{ fontSize: 16, fontWeight: 700, mb: 1.5 }}>{title}</Typography>
     {rows.length ? <TableContainer><Table size="small" aria-label={title}>
-      <TableHead><TableRow><TableCell>Trạng thái</TableCell><TableCell align="right">Số lượng</TableCell></TableRow></TableHead>
-      <TableBody>{rows.map(({ status, count }) => <TableRow key={status}><TableCell>{STATUS_LABEL[status] || status}</TableCell><TableCell align="right" className="tabular">{formatStatisticCount(count)}</TableCell></TableRow>)}</TableBody>
+      <TableHead><TableRow><TableCell>{columnLabel}</TableCell><TableCell align="right">Số lượng</TableCell></TableRow></TableHead>
+      <TableBody>{rows.map(({ status, count }) => <TableRow key={status}><TableCell>{labelOverrides?.[status] || STATUS_LABEL[status] || status}</TableCell><TableCell align="right" className="tabular">{formatStatisticCount(count)}</TableCell></TableRow>)}</TableBody>
     </Table></TableContainer> : <Typography color="text.secondary" variant="body2">Chưa có dữ liệu trạng thái trong kỳ này.</Typography>}
   </AppCard>;
 }
@@ -116,7 +119,7 @@ function TrendChart({ title, points, label = "Số lượng" }) {
 }
 
 function DomainContent({ role, topic, sources, retry }) {
-  if (topic === "auctions") return <SourcePanel title="đấu giá" source={sources.auctions} retry={retry.auctions}>{(data) => <>
+  if (topic === "auctions") return <SourcePanel title="Đấu giá" source={sources.auctions} retry={retry.auctions}>{(data) => <>
     <Metrics items={role === "carrier" ? [
       { title: "Phiên đã tham gia", value: formatStatisticCount(data.participations), subtitle: RANGE_LABEL[retry.range], icon: GavelOutlinedIcon },
       { title: "Phiên đã có kết quả", value: formatStatisticCount(data.decidedAuctions), subtitle: "Mẫu số tỷ lệ trúng", icon: GavelOutlinedIcon },
@@ -132,10 +135,10 @@ function DomainContent({ role, topic, sources, retry }) {
     <Box sx={{ mt: 2 }}><StatusTable title="Phân rã trạng thái phiên" statuses={data.byStatus} /></Box>
   </>}</SourcePanel>;
 
-  if (topic === "trips") return <SourcePanel title="chuyến vận chuyển" source={sources.trips} retry={retry.trips}>{(data) => <>
+  if (topic === "trips") return <SourcePanel title="Chuyến vận chuyển" source={sources.trips} retry={retry.trips}>{(data) => <>
     <Metrics items={[
       { title: "Tổng số chuyến", value: formatStatisticCount(data.total), subtitle: RANGE_LABEL[retry.range], icon: LocalShippingOutlinedIcon },
-      { title: "Giá trị hợp đồng đã ký", value: formatStatisticCurrency(data.agreedValue), subtitle: "Không đồng nghĩa với tiền đã thanh toán", icon: AccountBalanceWalletOutlinedIcon, tooltip: "Cộng agreedPrice của chuyến có hợp đồng SIGNED trong kỳ." },
+      { title: "Giá trị hợp đồng đã ký", value: formatStatisticCurrency(data.agreedValue), subtitle: "Không đồng nghĩa với tiền đã thanh toán", icon: AccountBalanceWalletOutlinedIcon, tooltip: "Cộng giá thỏa thuận của chuyến có hợp đồng đã ký trong kỳ." },
       ...(role === "admin" ? [{ title: "Chờ lấy hàng", value: formatStatisticCount(data.byStatus?.WAITING_PICKUP), subtitle: "Snapshot theo trạng thái hiện tại", icon: LocalShippingOutlinedIcon }] : []),
     ]} />
     <Box sx={{ mt: 2 }}><TrendChart title="Chuyến theo thời gian" points={data.series} label="Số chuyến" /></Box>
@@ -143,7 +146,7 @@ function DomainContent({ role, topic, sources, retry }) {
     {data.contractsByStatus ? <Box sx={{ mt: 2 }}><StatusTable title="Hợp đồng theo trạng thái" statuses={data.contractsByStatus} /></Box> : null}
   </>}</SourcePanel>;
 
-  if (topic === "fleet") return <SourcePanel title="đội xe" source={sources.fleet} retry={retry.fleet}>{(data) => <>
+  if (topic === "fleet") return <SourcePanel title="Đội xe" source={sources.fleet} retry={retry.fleet}>{(data) => <>
     <Metrics items={role === "admin" ? [
       { title: "Phương tiện", value: formatStatisticCount(data.vehicleCount), subtitle: "Snapshot hiện tại", icon: DirectionsCarOutlinedIcon },
       { title: "Tài xế", value: formatStatisticCount(data.driverCount), subtitle: "Snapshot hiện tại", icon: GroupsOutlinedIcon },
@@ -151,16 +154,16 @@ function DomainContent({ role, topic, sources, retry }) {
       { title: "Xe chờ duyệt", value: formatStatisticCount(data.vehicleByStatus?.PENDING), subtitle: "Hàng đợi hiện tại", icon: DirectionsCarOutlinedIcon },
     ] : [
       { title: "Phương tiện", value: formatStatisticCount(data.vehicleCount), subtitle: "Toàn bộ đội xe", icon: DirectionsCarOutlinedIcon },
-      { title: "Đang hoạt động", value: formatStatisticCount(data.activeVehicleCount), subtitle: "Trạng thái VERIFIED", icon: DirectionsCarOutlinedIcon },
+      { title: "Đang hoạt động", value: formatStatisticCount(data.activeVehicleCount), subtitle: "Đã xác minh", icon: DirectionsCarOutlinedIcon },
       { title: "Tài xế", value: formatStatisticCount(data.driverCount), subtitle: `${formatStatisticCount(data.verifiedDriverCount)} đã xác minh`, icon: GroupsOutlinedIcon },
       { title: "Điểm uy tín", value: formatStatisticCount(data.reputation), subtitle: "Nguồn uy tín fleet service", icon: BusinessOutlinedIcon },
     ]} />
-    {data.vehicleByStatus ? <Box sx={{ mt: 2 }}><StatusTable title="Phương tiện theo trạng thái" statuses={data.vehicleByStatus} /></Box> : null}
-    {data.driverByStatus ? <Box sx={{ mt: 2 }}><StatusTable title="Tài xế theo trạng thái" statuses={data.driverByStatus} /></Box> : null}
-    {data.byVehicleStatus ? <Box sx={{ mt: 2 }}><StatusTable title="Đội xe của bạn theo trạng thái" statuses={data.byVehicleStatus} /></Box> : null}
+    {data.vehicleByStatus ? <Box sx={{ mt: 2 }}><StatusTable title="Phương tiện theo trạng thái" statuses={data.vehicleByStatus} labelOverrides={{ PENDING: "Chờ duyệt" }} /></Box> : null}
+    {data.driverByStatus ? <Box sx={{ mt: 2 }}><StatusTable title="Tài xế theo trạng thái" statuses={data.driverByStatus} labelOverrides={{ PENDING: "Chờ duyệt" }} /></Box> : null}
+    {data.byVehicleStatus ? <Box sx={{ mt: 2 }}><StatusTable title="Đội xe của bạn theo trạng thái" statuses={data.byVehicleStatus} labelOverrides={{ PENDING: "Chờ duyệt" }} /></Box> : null}
   </>}</SourcePanel>;
 
-  if (topic === "accounts") return <SourcePanel title="tài khoản" source={sources.accounts} retry={retry.accounts}>{(data) => <>
+  if (topic === "accounts") return <SourcePanel title="Tài khoản" source={sources.accounts} retry={retry.accounts}>{(data) => <>
     <Metrics items={[
       { title: "Tài khoản mới", value: formatStatisticCount(data.totalNew), subtitle: RANGE_LABEL[retry.range], icon: GroupsOutlinedIcon },
       { title: "Chủ hàng hiện tại", value: formatStatisticCount(data.currentByRole?.SHIPPER), subtitle: "Snapshot tổng thể", icon: BusinessOutlinedIcon },
@@ -172,33 +175,33 @@ function DomainContent({ role, topic, sources, retry }) {
     <Box sx={{ mt: 2 }}><StatusTable title="Tài khoản hiện tại theo trạng thái" statuses={data.currentByStatus} /></Box>
   </>}</SourcePanel>;
 
-  if (topic === "wallet") return <SourcePanel title="giao dịch ví" source={sources.wallet} retry={retry.wallet}>{(data) => <>
+  if (topic === "wallet") return <SourcePanel title="Giao dịch ví" source={sources.wallet} retry={retry.wallet}>{(data) => <>
     <Metrics items={[
       { title: "Giao dịch thành công", value: formatStatisticCount(data.transactionsByStatus?.SUCCESS), subtitle: RANGE_LABEL[retry.range], icon: AccountBalanceWalletOutlinedIcon },
       { title: "Đang xử lý", value: formatStatisticCount(data.transactionsByStatus?.PENDING), subtitle: "Trong kỳ đã chọn", icon: AccountBalanceWalletOutlinedIcon },
       { title: "Thất bại", value: formatStatisticCount(data.transactionsByStatus?.FAILED), subtitle: "Trong kỳ đã chọn", icon: AccountBalanceWalletOutlinedIcon },
-      { title: "Tổng giá trị sổ cái SUCCESS", value: formatStatisticCurrency(data.successfulLedgerAmount), subtitle: "Không phải doanh thu/lợi nhuận", icon: AccountBalanceWalletOutlinedIcon, tooltip: "Tổng amount giao dịch SUCCESS theo loại; đây là luồng sổ cái, không phải doanh thu của nền tảng." },
+      { title: "Tổng giá trị sổ cái thành công", value: formatStatisticCurrency(data.successfulLedgerAmount), subtitle: "Không phải doanh thu/lợi nhuận", icon: AccountBalanceWalletOutlinedIcon, tooltip: "Tổng số tiền giao dịch thành công theo loại; đây là luồng sổ cái, không phải doanh thu của nền tảng." },
     ]} />
-    <Box sx={{ mt: 2 }}><TrendChart title="Giao dịch SUCCESS theo thời gian" points={data.successfulSeries} label="Giao dịch" /></Box>
-    <Box sx={{ mt: 2 }}><StatusTable title="Giao dịch theo trạng thái" statuses={data.transactionsByStatus} /></Box>
-    <Box sx={{ mt: 2 }}><StatusTable title="Giao dịch SUCCESS theo loại" statuses={Object.fromEntries(Object.entries(data.successfulByType || {}).map(([type, item]) => [type, item.count]))} /></Box>
+    <Box sx={{ mt: 2 }}><TrendChart title="Giao dịch thành công theo thời gian" points={data.successfulSeries} label="Giao dịch" /></Box>
+    <Box sx={{ mt: 2 }}><StatusTable title="Giao dịch theo trạng thái" statuses={data.transactionsByStatus} labelOverrides={{ PENDING: "Đang chờ" }} /></Box>
+    <Box sx={{ mt: 2 }}><StatusTable title="Giao dịch thành công theo loại" columnLabel="Loại giao dịch" labelOverrides={TRANSACTION_TYPE_LABELS} statuses={Object.fromEntries(Object.entries(data.successfulByType || {}).map(([type, item]) => [type, item.count]))} /></Box>
   </>}</SourcePanel>;
 
   if (topic === "queues" && role === "admin") return <Grid container spacing={2}>
-    <Grid item xs={12} md={6}><SourcePanel title="xác minh tài khoản" source={sources.accounts} retry={retry.accounts}>{(data) => <Metrics items={[
+    <Grid item xs={12} md={6}><SourcePanel title="Xác minh tài khoản" source={sources.accounts} retry={retry.accounts}>{(data) => <Metrics items={[
       { title: "Doanh nghiệp chờ duyệt", value: formatStatisticCount(data.currentVerificationQueues?.businessPending), subtitle: "Snapshot hiện tại", icon: BusinessOutlinedIcon, href: "/admin/business-verifications" },
     ]} />}</SourcePanel></Grid>
-    <Grid item xs={12} md={6}><SourcePanel title="duyệt đội xe" source={sources.fleet} retry={retry.fleet}>{(data) => <Metrics items={[
+    <Grid item xs={12} md={6}><SourcePanel title="Duyệt đội xe" source={sources.fleet} retry={retry.fleet}>{(data) => <Metrics items={[
       { title: "Phương tiện chờ duyệt", value: formatStatisticCount(data.vehicleByStatus?.PENDING), subtitle: "Snapshot hiện tại", icon: DirectionsCarOutlinedIcon, href: "/admin/fleet-verifications" },
       { title: "Tài xế chờ duyệt", value: formatStatisticCount(data.driverByStatus?.PENDING), subtitle: "Snapshot hiện tại", icon: GroupsOutlinedIcon, href: "/admin/fleet-verifications" },
     ]} />}</SourcePanel></Grid>
-    <Grid item xs={12} md={6}><SourcePanel title="rút tiền" source={sources.wallet} retry={retry.wallet}>{(data) => <Metrics items={[
+    <Grid item xs={12} md={6}><SourcePanel title="Rút tiền" source={sources.wallet} retry={retry.wallet}>{(data) => <Metrics items={[
       { title: "Yêu cầu rút tiền chờ xử lý", value: formatStatisticCount(data.withdrawalsByStatus?.PENDING), subtitle: "Snapshot hiện tại", icon: AccountBalanceWalletOutlinedIcon, href: "/admin/wallets" },
       { title: "Đã duyệt", value: formatStatisticCount(data.withdrawalsByStatus?.APPROVED), subtitle: "Snapshot hiện tại", icon: AccountBalanceWalletOutlinedIcon, href: "/admin/wallets" },
     ]} />}</SourcePanel></Grid>
-    <Grid item xs={12} md={6}><SourcePanel title="khiếu nại" source={sources.complaints} retry={retry.complaints}>{(data) => <>
+    <Grid item xs={12} md={6}><SourcePanel title="Khiếu nại" source={sources.complaints} retry={retry.complaints}>{(data) => <>
       <Metrics items={[{ title: "Khiếu nại cần xử lý", value: formatStatisticCount(data.openCount), subtitle: "Đang chờ hoặc xử lý", icon: GroupsOutlinedIcon, href: "/admin/complaints" }]} />
-      <Box sx={{ mt: 2 }}><StatusTable title="Khiếu nại hiện tại theo trạng thái" statuses={data.complaintsByStatus} /></Box>
+      <Box sx={{ mt: 2 }}><StatusTable title="Khiếu nại hiện tại theo trạng thái" statuses={data.complaintsByStatus} labelOverrides={{ PENDING: "Chờ xử lý" }} /></Box>
     </>}</SourcePanel></Grid>
   </Grid>;
 
@@ -261,7 +264,23 @@ export default function StatisticsScreen({ role }) {
     <PageHeader title={config.title} subtitle="Số liệu được tổng hợp từ dịch vụ nghiệp vụ, theo ngày Việt Nam đã chọn." breadcrumbs={[{ label: "Tổng quan", path: config.dashboard }, { label: "Thống kê" }]} />
     <AppCard component="section" sx={{ p: { xs: 1, sm: 1.5 } }}>
       <Typography component="h2" sx={{ px: 1, pt: 0.5, fontSize: 13, color: "text.secondary", fontWeight: 700 }}>Khoảng thời gian</Typography>
-      <Tabs value={range} onChange={(_, value) => setRange(value)} variant="fullWidth" aria-label="Lọc khoảng thời gian" sx={{ width: { xs: "100%", sm: "fit-content" }, maxWidth: { sm: 560 }, minHeight: 44, "& .MuiTab-root": { minHeight: 44, minWidth: 0, px: 0.5, fontSize: { xs: 12, sm: 13 }, whiteSpace: "nowrap" } }}>
+      <Tabs
+        value={range}
+        onChange={(_, value) => setRange(value)}
+        variant="scrollable"
+        scrollButtons="auto"
+        aria-label="Lọc khoảng thời gian"
+        sx={{
+          minHeight: 44,
+          "& .MuiTab-root": {
+            minHeight: 44,
+            minWidth: "auto",
+            px: { xs: 1.5, sm: 2 },
+            fontSize: { xs: 12, sm: 13 },
+            whiteSpace: "nowrap",
+          },
+        }}
+      >
         {STAT_RANGE_OPTIONS.map((option) => <Tab key={option.value} value={option.value} label={option.label} />)}
       </Tabs>
       {range === "custom" && <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 1.25, p: 1 }}>

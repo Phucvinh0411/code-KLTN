@@ -16,7 +16,6 @@ import TablePagination from "@mui/material/TablePagination";
 import TableRow from "@mui/material/TableRow";
 import TableSortLabel from "@mui/material/TableSortLabel";
 import Typography from "@mui/material/Typography";
-import MoreVertIcon from "@mui/icons-material/MoreVert";
 import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
 import {
   AdminDialog,
@@ -34,6 +33,7 @@ import {
 } from "@/components/admin/AdminUI";
 import { identityApi } from "@/services/identityApi";
 import { getApiErrorMessage } from "@/services/errorMessage";
+import { getPaginationItemAriaLabel, shortId } from "@/lib/format";
 import { useGlobalNotification } from "@/components/common/NotificationPopup";
 
 const typeOptions = [
@@ -62,6 +62,7 @@ function StatusChip({ user }) {
     ACTIVE: ["Đang hoạt động", "success"],
     INACTIVE: ["Chưa kích hoạt", "warning"],
     BLOCKED: ["Đã khóa", "danger"],
+    EXPIRED: ["Hết hạn", "neutral"],
   };
   const [label, tone] = designs[status] || [status || "Chưa rõ", "neutral"];
   return <AdminStatusChip label={label} tone={tone} />;
@@ -267,9 +268,10 @@ export default function AdminUsersPage() {
                         </Typography>
                         <Typography
                           variant="caption"
-                          sx={{ color: "text.secondary", fontWeight: 600 }}
+                          title={row.id}
+                          sx={{ color: "text.secondary", fontWeight: 600, fontFamily: "monospace" }}
                         >
-                          {row.id}
+                          #{shortId(row.id)}
                         </Typography>
                       </Box>
                     </Box>
@@ -305,13 +307,6 @@ export default function AdminUsersPage() {
                     >
                       <VisibilityOutlinedIcon fontSize="small" />
                     </IconButton>
-                    <IconButton
-                      size="small"
-                      sx={{ color: "text.secondary", ml: 0.5 }}
-                      aria-label="Tùy chọn"
-                    >
-                      <MoreVertIcon fontSize="small" />
-                    </IconButton>
                   </TableCell>
                 </TableRow>
               ))}
@@ -340,6 +335,10 @@ export default function AdminUsersPage() {
             setRowsPerPage(parseInt(event.target.value, 10));
             setPage(0);
           }}
+          labelRowsPerPage="Số dòng mỗi trang:"
+          labelDisplayedRows={({ from, to, count }) => `${from}–${to} trên tổng ${count}`}
+          getItemAriaLabel={getPaginationItemAriaLabel}
+          SelectProps={{ inputProps: { id: "admin-users-rows-per-page", name: "rowsPerPage", "aria-label": "Số dòng mỗi trang" } }}
         />
       </AdminSectionCard>
 
@@ -453,7 +452,13 @@ export default function AdminUsersPage() {
                   <Typography variant="body2">
                     Trạng thái eKYC/doanh nghiệp:{" "}
                     <strong>
-                      {selectedUser.verificationStatus || "Chưa có dữ liệu"}
+                      {({
+                        PENDING: "Chờ duyệt",
+                        VERIFIED: "Đã xác minh",
+                        REJECTED: "Từ chối",
+                        EXPIRED: "Hết hạn",
+                        NOT_SUBMITTED: "Chưa nộp",
+                      }[selectedUser.verificationStatus] || selectedUser.verificationStatus || "Chưa có dữ liệu")}
                     </strong>
                   </Typography>
                   <Typography variant="body2" sx={{ mt: 1 }}>

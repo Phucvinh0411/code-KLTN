@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useNativeInputSync } from "@/hooks/useNativeInputSync";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import CircularProgress from "@mui/material/CircularProgress";
@@ -31,10 +32,8 @@ import {
   AdminToolbar,
 } from "@/components/admin/AdminUI";
 import { axiosClient } from "@/configs/axiosClient";
-import {
-  BUSINESS_VERIFICATION_PATH,
-  businessVerificationDocumentPath,
-} from "@/components/businessVerification/businessVerificationApi";
+import { getPaginationItemAriaLabel } from "@/lib/format";
+import { BUSINESS_VERIFICATION_PATH } from "@/components/businessVerification/businessVerificationApi";
 
 const STATUS_OPTIONS = [
   { value: "PENDING", label: "Đang chờ duyệt" },
@@ -112,7 +111,9 @@ function EkycEvidenceThumb({ reportId, part, label }) {
   return (
     <Box className="flex flex-col items-center gap-1">
       {src ? (
-        <img src={src} alt={label} className="h-28 w-full rounded-lg object-cover" />
+        /* Private authenticated blob; never place bearer credentials in an image URL. */
+        /* eslint-disable-next-line @next/next/no-img-element */
+        <img src={src} alt={label} loading="lazy" decoding="async" className="h-28 w-full rounded-lg object-cover" />
       ) : (
         <Box className="flex h-28 w-full items-center justify-center rounded-lg bg-black/5 text-xs text-ink-muted">
           {failed ? "Không tải được ảnh" : "Đang tải…"}
@@ -133,6 +134,7 @@ export default function AdminBusinessVerificationsPage() {
   const [totalItems, setTotalItems] = useState(0);
   const [selected, setSelected] = useState(null);
   const [rejectionReason, setRejectionReason] = useState("");
+  const reasonInputRef = useNativeInputSync(setRejectionReason);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -189,30 +191,25 @@ export default function AdminBusinessVerificationsPage() {
   };
 
   const downloadDocument = async (documentType = "businessLicense") => {
-    const s3Url = documentType === "authorizationLetter"
-      ? selected?.authorizationLetterUrl
-      : selected?.businessLicenseUrl;
-    if (!/^https:\/\//i.test(s3Url || "")) {
-      setErrorMessage("Tài liệu S3 không có URL hợp lệ.");
-      return;
-    }
-    window.open(s3Url, "_blank", "noopener,noreferrer");
-    if (s3Url) return;
-
+    if (!selected?.id) return;
+    setErrorMessage("");
     try {
       const { data } = await axiosClient.get(
-        businessVerificationDocumentPath(selected.id, documentType),
+        `/api/v1/business-verifications/${encodeURIComponent(selected.id)}/documents/${encodeURIComponent(documentType)}`,
         { responseType: "blob" }
       );
       const objectUrl = URL.createObjectURL(data);
-      const anchor = document.createElement("a");
-      anchor.href = objectUrl;
-      anchor.download =
-        documentType === "authorizationLetter"
-          ? selected.authorizationLetterFilename || "giay-uy-quyen"
-          : selected.businessLicenseFilename || "giay-phep-doanh-nghiep";
-      anchor.click();
-      URL.revokeObjectURL(objectUrl);
+      const opened = window.open(objectUrl, "_blank");
+      if (!opened) {
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download =
+          documentType === "authorizationLetter"
+            ? selected.authorizationLetterFilename || "giay-uy-quyen"
+            : selected.businessLicenseFilename || "giay-phep-doanh-nghiep";
+        anchor.click();
+      }
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
     } catch (error) {
       setErrorMessage(
         error.response?.data?.message || "Không thể tải tài liệu doanh nghiệp."
@@ -337,6 +334,10 @@ export default function AdminBusinessVerificationsPage() {
                 setPageSize(Number(event.target.value));
                 setPage(0);
               }}
+              labelRowsPerPage="Số dòng mỗi trang:"
+              labelDisplayedRows={({ from, to, count }) => `${from}–${to} trên tổng ${count}`}
+              getItemAriaLabel={getPaginationItemAriaLabel}
+              SelectProps={{ inputProps: { id: "admin-business-rows-per-page", name: "rowsPerPage", "aria-label": "Số dòng mỗi trang" } }}
             />
           </>
         )}
@@ -414,8 +415,18 @@ export default function AdminBusinessVerificationsPage() {
                   Số CCCD 12 số: {selected.ekycRepresentative.citizenId || "Chưa có"}
                 </Typography>
                 <Typography variant="body2">
-                  Kết quả eKYC: {selected.ekycRepresentative.status} ·{" "}
-                  {selected.ekycRepresentative.verificationMethod || "chưa có phương thức"}
+                  Kết quả eKYC:{" "}
+                  {({ VERIFIED: "Đã xác minh", PENDING: "Chờ duyệt", REJECTED: "Từ chối", EXPIRED: "Hết hạn" }[
+                    selected.ekycRepresentative.status
+                  ] || selected.ekycRepresentative.status)}{" "}
+                  ·{" "}
+                  {({
+                    NFC_AUTO: "NFC tự động",
+                    LOCAL_NFC_DEVELOPMENT: "NFC phát triển",
+                    MANUAL_DOCUMENT_REVIEW: "Duyệt hồ sơ thủ công",
+                  }[selected.ekycRepresentative.verificationMethod] ||
+                    selected.ekycRepresentative.verificationMethod ||
+                    "chưa có phương thức")}
                 </Typography>
                 {selected.ekycRepresentative.evidenceAvailable ? (
                   <Box className="mt-3 grid grid-cols-3 gap-2">
@@ -461,9 +472,13 @@ export default function AdminBusinessVerificationsPage() {
 
           {selected?.status === "PENDING" && (
             <TextField
+              id="business-verifications-rejection-reason"
+              name="rejectionReason"
               label="Lý do từ chối (bắt buộc nếu từ chối)"
               value={rejectionReason}
               onChange={(event) => setRejectionReason(event.target.value)}
+              onInput={(event) => setRejectionReason(event.target.value)}
+              inputRef={reasonInputRef}
               multiline
               rows={3}
               inputProps={{ maxLength: 500 }}

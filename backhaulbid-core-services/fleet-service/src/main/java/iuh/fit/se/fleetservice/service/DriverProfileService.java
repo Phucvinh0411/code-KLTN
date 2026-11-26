@@ -45,12 +45,6 @@ public class DriverProfileService {
     }
 
     @Transactional
-    public List<DriverProfile> createBulk(UUID carrierId, List<CreateDriverRequest> requests) {
-        validateBulkSize(requests);
-        return requests.stream().map(request -> create(carrierId, request)).toList();
-    }
-
-    @Transactional
     public DriverProfile update(UUID carrierId, UUID driverId, UpdateDriverRequest request) {
         DriverProfile driver = findOwned(carrierId, driverId);
         String licenseNumber = normalize(request.licenseNumber());
@@ -100,6 +94,23 @@ public class DriverProfileService {
         return driverRepository.save(driver);
     }
 
+    @Transactional(readOnly = true)
+    public String getAuthorizedLicenseImageUrl(UUID accountId, String role, UUID driverId) {
+        if (!"ADMIN".equalsIgnoreCase(role) && !"CARRIER".equalsIgnoreCase(role)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Carrier or admin role required");
+        }
+        DriverProfile driver = driverRepository.findById(driverId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Driver not found"));
+        if (!"ADMIN".equalsIgnoreCase(role) && !accountId.equals(driver.getCarrierId())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Driver does not belong to the carrier");
+        }
+        String url = driver.getLicenseImageUrl();
+        if (url == null || url.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Chưa có ảnh giấy phép lái xe");
+        }
+        return url;
+    }
+
     private DriverProfile findOwned(UUID carrierId, UUID driverId) {
         DriverProfile driver = driverRepository.findById(driverId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Driver not found"));
@@ -130,11 +141,5 @@ public class DriverProfileService {
 
     private boolean safeEquals(String left, String right) {
         return left == null ? right == null : left.equals(right);
-    }
-
-    private void validateBulkSize(List<?> requests) {
-        if (requests == null || requests.isEmpty() || requests.size() > 500) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Bulk import must contain 1 to 500 records");
-        }
     }
 }

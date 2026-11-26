@@ -4,6 +4,9 @@ const CODE_MESSAGES = {
   WALLET_404: "Không tìm thấy giao dịch hoặc đơn thanh toán. Vui lòng tải lại danh sách rồi thử lại.",
   WALLET_409: "Đơn nạp hoặc giao dịch ví đang ở trạng thái không thể tiếp tục. Vui lòng kiểm tra số dư và trạng thái đơn rồi thử lại.",
   WALLET_422: "Thông tin thanh toán chưa hợp lệ hoặc số tiền không khớp. Vui lòng kiểm tra lại trước khi thử lại.",
+  EKYC_REQUIRED: "Tài khoản chưa xác thực định danh người đại diện (eKYC). Vui lòng hoàn tất eKYC trước khi thực hiện thao tác này.",
+  ACCOUNT_VERIFICATION_REQUIRED: "Tài khoản chưa hoàn tất xác minh doanh nghiệp. Vui lòng gửi và chờ duyệt hồ sơ doanh nghiệp trước khi thực hiện thao tác này.",
+  CARRIER_COVERAGE_REQUIRED: "Phiên đấu giá yêu cầu bảo hiểm trách nhiệm hàng hóa còn hiệu lực. Vui lòng cập nhật và chờ duyệt chứng từ bảo hiểm tại cài đặt tài khoản.",
 };
 
 const SAFE_VIETNAMESE_MESSAGE = /[À-ỹ]/u;
@@ -60,11 +63,21 @@ function translateKnownMessage(message, status, code) {
   if (!normalized) return undefined;
   if (CODE_MESSAGES[code]) return CODE_MESSAGES[code];
   if (status === 401) return "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại rồi thử lại.";
+  if (SAFE_VIETNAMESE_MESSAGE.test(normalized) && !TECHNICAL_MESSAGE.test(normalized)) return normalized;
   if (status === 403 || /forbidden|do not have access|role required|permission/i.test(normalized)) {
     return "Tài khoản hiện tại không có quyền thực hiện thao tác này. Vui lòng kiểm tra đúng vai trò tài khoản.";
   }
   if (status === 404 || /not found/i.test(normalized)) {
     return "Không tìm thấy dữ liệu cần xử lý. Vui lòng tải lại trang rồi thử lại.";
+  }
+  if (status === 409) {
+    if (/identity is already verified|already verified/i.test(normalized)) {
+      return "Tài khoản đã hoàn tất xác thực eKYC trước đó.";
+    }
+    return "Thao tác bị xung đột với trạng thái dữ liệu hiện tại. Vui lòng tải lại trang rồi thử lại.";
+  }
+  if (status === 502 || status === 503 || status === 504 || /service unavailable|gateway timeout|timed out/i.test(normalized)) {
+    return "Dịch vụ liên quan đang quá tải hoặc tạm gián đoạn. Vui lòng thử lại sau ít giây.";
   }
   if (/contact phone is invalid/i.test(normalized)) {
     return "Số điện thoại người liên hệ không hợp lệ (cần từ 8 đến 30 chữ số).";
@@ -77,6 +90,12 @@ function translateKnownMessage(message, status, code) {
   }
   if (/address label is required/i.test(normalized)) {
     return "Vui lòng nhập tên địa chỉ kho.";
+  }
+  if (/phone number already exists|số điện thoại này đã được đăng ký/i.test(normalized)) {
+    return "Số điện thoại này đã được đăng ký.";
+  }
+  if (/email already exists|email này đã được sử dụng/i.test(normalized)) {
+    return "Email này đã được sử dụng.";
   }
   if (/coordinates must be a complete pair/i.test(normalized)) {
     return "Tọa độ vị trí kho không hợp lệ hoặc thiếu kinh độ/vĩ độ.";
@@ -104,14 +123,22 @@ function translateKnownMessage(message, status, code) {
   if (/unsupported|invalid.*(file|type|format)|file.*(large|size)/i.test(normalized)) {
     return "Tệp tải lên chưa đúng định dạng hoặc quá dung lượng. Vui lòng chọn tệp được hỗ trợ rồi thử lại.";
   }
-  if (SAFE_VIETNAMESE_MESSAGE.test(normalized) && !TECHNICAL_MESSAGE.test(normalized)) return normalized;
   return undefined;
 }
 
 export function getApiErrorMessage(error, fallback = "Không thể thực hiện yêu cầu.") {
   const payload = error?.response?.data;
-  const code = payload?.error?.code;
+  const code = payload?.code || payload?.error?.code;
   const status = error?.response?.status || payload?.error?.details?.status;
   const message = translateKnownMessage(getRawMessage(error), status, code);
-  return message || fallback;
+  if (message) return message;
+  if (error?.response && status) {
+    if (status >= 500) {
+      return "Máy chủ đang gặp sự cố tạm thời. Vui lòng thử lại sau ít giây.";
+    }
+    if (fallback === "Không thể kết nối tới máy chủ.") {
+      return `Yêu cầu chưa thể xử lý (mã lỗi ${status}). Vui lòng kiểm tra dữ liệu và thử lại.`;
+    }
+  }
+  return fallback;
 }

@@ -8,7 +8,8 @@ import Typography from "@mui/material/Typography";
 import { AdminPageHeader, AdminPageShell, AdminPrimaryButton } from "@/components/admin/AdminUI";
 import AuctionMonitorView from "@/components/admin/AuctionMonitorView";
 import useAuctionSocket from "@/hooks/useAuctionSocket";
-import { cancelAuction, flagAuction, listAuctions, listBids } from "@/services/biddingApi";
+import { cancelAuction, flagAuction, listAuctions, listBids, unflagAuction } from "@/services/biddingApi";
+import { identityApi } from "@/services/identityApi";
 import { getPageItems, unwrapListData } from "@/services/responseData";
 import { getVehicleTypeLabel } from "@/lib/statusMeta";
 
@@ -20,31 +21,36 @@ const getImageSource = (images) => {
   return images.find((image) => typeof image === "string" && image.trim()) || null;
 };
 
+const formatBidEntries = (rawBids = []) =>
+  rawBids.map((bid) => ({
+    id: bid.id,
+    time: bid.bidTime
+      ? new Date(bid.bidTime).toLocaleTimeString("vi-VN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })
+      : "--:--",
+    bid: Number(bid.bidAmount),
+    carrierId: bid.carrierId,
+  }));
+
 const mapAuction = async (auction) => {
   let bids = [];
   let bidError = "";
+  const loadUpfront = auction.status === "OPEN";
 
-  try {
-    const bidsResponse = await listBids(auction.id, {
-      page: 1,
-      pageSize: 100,
-      sortOrder: "asc",
-    });
-
-    bids = unwrapListData(bidsResponse).map((bid) => ({
-      id: bid.id,
-      time: bid.bidTime
-        ? new Date(bid.bidTime).toLocaleTimeString("vi-VN", {
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          })
-        : "--:--",
-      bid: Number(bid.bidAmount),
-      carrierId: bid.carrierId,
-    }));
-  } catch (error) {
-    bidError = getErrorMessage(error, "Không thể tải lịch sử báo giá cho phiên này.");
+  if (loadUpfront) {
+    try {
+      const bidsResponse = await listBids(auction.id, {
+        page: 1,
+        pageSize: 100,
+        sortOrder: "asc",
+      });
+      bids = formatBidEntries(unwrapListData(bidsResponse));
+    } catch (error) {
+      bidError = getErrorMessage(error, "Không thể tải lịch sử báo giá cho phiên này.");
+    }
   }
 
   const amounts = bids.map((item) => item.bid).filter(Number.isFinite);
@@ -63,6 +69,7 @@ const mapAuction = async (auction) => {
     status: auction.status,
     startPrice: maxPrice,
     bidHistory: bids,
+    bidsLoaded: loadUpfront || auction.status === "PENDING" || auction.status === "CANCELLED",
     bidError,
     image: getImageSource(auction.images),
     fraudFlag: Boolean(auction.fraudFlag),
@@ -76,9 +83,56 @@ const mapAuction = async (auction) => {
 
 export default function AdminOperationsPage() {
   const [sessions, setSessions] = useState([]);
+  const [carrierNames, setCarrierNames] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const { joinMonitor, on, connected } = useAuctionSocket();
+
+  useEffect(() => {
+    let active = true;
+    identityApi
+      .listAdminAccounts()
+      .then((accounts) => {
+        if (!active || !Array.isArray(accounts)) return;
+        const map = {};
+        accounts.forEach((account) => {
+          if (account?.id) {
+            map[String(account.id)] = account.companyName || account.fullName || account.phone;
+          }
+        });
+        setCarrierNames(map);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const loadSessionBids = useCallback(async (auctionId) => {
+    try {
+      const bidsResponse = await listBids(auctionId, {
+        page: 1,
+        pageSize: 100,
+        sortOrder: "asc",
+      });
+      const bids = formatBidEntries(unwrapListData(bidsResponse));
+      const amounts = bids.map((item) => item.bid).filter(Number.isFinite);
+      setSessions((current) =>
+        current.map((session) => {
+          if (session.id !== auctionId) return session;
+          return {
+            ...session,
+            bidHistory: bids,
+            bidsLoaded: true,
+            currentBid: amounts.length ? Math.min(...amounts) : session.currentBid,
+            activeBidders: new Set(bids.map((item) => item.carrierId).filter(Boolean)).size,
+          };
+        }),
+      );
+    } catch {
+      // Keep existing summary cleanly if detail bid history fails to load.
+    }
+  }, []);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -194,7 +248,7 @@ export default function AdminOperationsPage() {
             placeItems: "center",
             border: "1px solid var(--color-line)",
             borderRadius: 3,
-            bgcolor: "rgba(255,255,255,0.72)",
+            bgcolor: "var(--color-surface)",
           }}
         >
           <Box sx={{ display: "grid", justifyItems: "center", gap: 1.5 }}>
@@ -241,7 +295,9 @@ export default function AdminOperationsPage() {
       ) : (
         <AuctionMonitorView
           sessions={sessions}
+          carrierNames={carrierNames}
           live={connected}
+          onLoadSessionBids={loadSessionBids}
           onCancelAuction={async (auctionId) => {
             await cancelAuction(auctionId);
             setSessions((current) =>
@@ -256,6 +312,16 @@ export default function AdminOperationsPage() {
               current.map((session) =>
                 session.id === auctionId
                   ? { ...session, fraudFlag: true, fraudReason: reason }
+                  : session,
+              ),
+            );
+          }}
+          onUnflagAuction={async (auctionId) => {
+            await unflagAuction(auctionId);
+            setSessions((current) =>
+              current.map((session) =>
+                session.id === auctionId
+                  ? { ...session, fraudFlag: false, fraudReason: "" }
                   : session,
               ),
             );

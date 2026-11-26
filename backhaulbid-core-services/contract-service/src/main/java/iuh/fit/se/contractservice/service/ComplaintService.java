@@ -1,5 +1,6 @@
 package iuh.fit.se.contractservice.service;
 
+import iuh.fit.se.contractservice.config.RabbitMQConfig;
 import iuh.fit.se.contractservice.domain.entity.Complaint;
 import iuh.fit.se.contractservice.domain.entity.ComplaintMessage;
 import iuh.fit.se.contractservice.domain.entity.Trip;
@@ -10,10 +11,15 @@ import iuh.fit.se.contractservice.dto.AddComplaintMessageRequest;
 import iuh.fit.se.contractservice.dto.ComplaintResponse;
 import iuh.fit.se.contractservice.dto.CreateComplaintRequest;
 import iuh.fit.se.contractservice.dto.ResolveComplaintRequest;
+import iuh.fit.se.contractservice.mapper.ComplaintMapper;
 import iuh.fit.se.contractservice.repository.ComplaintRepository;
 import iuh.fit.se.contractservice.repository.TripRepository;
-import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
+import org.springframework.lang.Nullable;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -29,13 +35,37 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.time.Instant;
 import java.util.UUID;
 
+@Slf4j
 @Service
-@RequiredArgsConstructor
 public class ComplaintService {
     private final ComplaintRepository complaintRepository;
     private final TripRepository tripRepository;
+    private final ComplaintMapper complaintMapper;
+    @Nullable
+    private final RabbitTemplate rabbitTemplate;
     private final Map<UUID, CopyOnWriteArrayList<SseEmitter>> subscribers = new ConcurrentHashMap<>();
     private final Map<UUID, Object> subscriberLocks = new ConcurrentHashMap<>();
+
+    public ComplaintService(
+            ComplaintRepository complaintRepository,
+            TripRepository tripRepository,
+            ComplaintMapper complaintMapper) {
+        this(complaintRepository, tripRepository, complaintMapper, null);
+    }
+
+    @Autowired
+    public ComplaintService(
+            ComplaintRepository complaintRepository,
+            TripRepository tripRepository,
+            ComplaintMapper complaintMapper,
+            @Nullable RabbitTemplate rabbitTemplate) {
+        this.complaintRepository = complaintRepository;
+        this.tripRepository = tripRepository;
+        this.complaintMapper = complaintMapper;
+        this.rabbitTemplate = rabbitTemplate;
+    }
+
+    public record ComplaintSseEvent(UUID complaintId, ComplaintResponse payload) {}
 
     @Transactional(readOnly = true)
     public List<ComplaintResponse> list(UUID accountId, AccountRole role) {
@@ -65,12 +95,12 @@ public class ComplaintService {
                     ? complaintRepository.findByCategoryOrderByCreatedAtDesc(category)
                     : complaintRepository.findPartyComplaintsByCategory(accountId, category);
         }
-        return complaints.stream().map(ComplaintResponse::from).toList();
+        return complaintMapper.toResponses(complaints);
     }
 
     @Transactional(readOnly = true)
     public ComplaintResponse get(UUID accountId, AccountRole role, UUID complaintId) {
-        return ComplaintResponse.from(loadAccessible(accountId, role, complaintId));
+        return complaintMapper.toResponse(loadAccessible(accountId, role, complaintId));
     }
 
     @Transactional
@@ -103,7 +133,7 @@ public class ComplaintService {
                 .evidenceUrl(normalizeOptional(request.evidenceUrl()))
                 .status(ComplaintStatus.PENDING)
                 .build();
-        return ComplaintResponse.from(complaintRepository.save(complaint));
+        return complaintMapper.toResponse(complaintRepository.save(complaint));
     }
 
     @Transactional
@@ -118,7 +148,7 @@ public class ComplaintService {
                 .createdAt(Instant.now())
                 .build());
         if (complaint.getStatus() == ComplaintStatus.PENDING) complaint.setStatus(ComplaintStatus.PROCESSING);
-        ComplaintResponse response = ComplaintResponse.from(complaintRepository.save(complaint));
+        ComplaintResponse response = complaintMapper.toResponse(complaintRepository.save(complaint));
         publishAfterCommit(complaintId, response);
         return response;
     }
@@ -139,7 +169,7 @@ public class ComplaintService {
                 .message(request.resolution().trim())
                 .createdAt(Instant.now())
                 .build());
-        ComplaintResponse response = ComplaintResponse.from(complaintRepository.save(complaint));
+        ComplaintResponse response = complaintMapper.toResponse(complaintRepository.save(complaint));
         publishAfterCommit(complaintId, response);
         return response;
     }
@@ -168,16 +198,38 @@ public class ComplaintService {
     }
 
     private void publishAfterCommit(UUID complaintId, ComplaintResponse response) {
+        Runnable broadcast = () -> {
+            if (rabbitTemplate != null) {
+                try {
+                    rabbitTemplate.convertAndSend(
+                            RabbitMQConfig.COMPLAINT_SSE_EXCHANGE,
+                            "",
+                            new ComplaintSseEvent(complaintId, response));
+                    return;
+                } catch (RuntimeException exception) {
+                    log.warn("RabbitMQ SSE fanout failed for complaint {}, falling back to local emitters: {}",
+                            complaintId, exception.getMessage());
+                }
+            }
+            publish(complaintId, response);
+        };
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    publish(complaintId, response);
+                    broadcast.run();
                 }
             });
             return;
         }
-        publish(complaintId, response);
+        broadcast.run();
+    }
+
+    @RabbitListener(queues = "#{complaintSseQueue.name}")
+    public void onRemoteComplaintUpdate(ComplaintSseEvent event) {
+        if (event != null && event.complaintId() != null && event.payload() != null) {
+            publish(event.complaintId(), event.payload());
+        }
     }
 
     private void publish(UUID complaintId, ComplaintResponse response) {

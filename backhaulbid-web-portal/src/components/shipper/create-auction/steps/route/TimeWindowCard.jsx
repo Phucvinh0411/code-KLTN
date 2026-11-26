@@ -1,9 +1,7 @@
-import TextField from "@mui/material/TextField";
 import Typography from "@mui/material/Typography";
 import AccessTimeIcon from "@mui/icons-material/AccessTimeOutlined";
+import SyncedDateTimeField from "@/components/ui/SyncedDateTimeField";
 import ScheduleReminder from "./ScheduleReminder";
-
-const INPUT_SX = { "& .MuiOutlinedInput-root": { borderRadius: "16px" } };
 
 const WINDOW_ROWS = [
   [
@@ -24,7 +22,7 @@ export default function TimeWindowCard({ form, updateForm }) {
         <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-warning-soft text-warning">
           <AccessTimeIcon className="!text-[1.1rem]" />
         </div>
-        <Typography className="!text-sm !font-black text-ink">Khung Thời Gian Vận Chuyển Dự Kiến</Typography>
+        <Typography className="!text-sm !font-bold text-ink">Khung thời gian vận chuyển dự kiến</Typography>
       </div>
 
       <ScheduleReminder form={form} step="shipping" />
@@ -32,16 +30,13 @@ export default function TimeWindowCard({ form, updateForm }) {
       {WINDOW_ROWS.map((row) => (
         <div key={row[0].field} className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {row.map(({ field, label }) => (
-            <TextField
+            <SyncedDateTimeField
               key={field}
-              fullWidth
-              type="datetime-local"
+              required
               label={label}
               name={field}
               value={form[field]}
-              onChange={(event) => updateForm(field, event.target.value)}
-              InputLabelProps={{ shrink: true }}
-              sx={INPUT_SX}
+              onValueChange={(nextValue) => updateForm(field, nextValue)}
             />
           ))}
         </div>

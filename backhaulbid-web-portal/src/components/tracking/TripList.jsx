@@ -7,11 +7,17 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import TripProgress from "./TripProgress";
 import { RouteLine, StatusBadge } from "@/components/ui";
 import { getTripStatusMeta } from "@/lib/statusMeta";
-import { formatDateTime, formatMoney, shortId } from "@/lib/format";
+import { formatAddress, formatDateTime, formatMoney, shortId } from "@/lib/format";
+
+/** Whether a WAITING_PICKUP trip already has a signed contract allowing driver assignment. */
+export function isContractReadyForDriver(trip) {
+  return !trip?.contractStatus || trip.contractStatus === "SIGNED";
+}
 
 /** The next step for a trip from the given role's point of view (null when nothing is pending). */
 export function getTripNextStep(trip, role) {
   if (role === "carrier") {
+    if (trip.status === "WAITING_PICKUP" && !isContractReadyForDriver(trip)) return { label: "Chờ ký hợp đồng", tone: "warning" };
     if (trip.status === "WAITING_PICKUP" && !trip.driverId) return { label: "Cần phân công tài xế", tone: "danger" };
     if (trip.status === "WAITING_PICKUP" && trip.driverId && !trip.driverConnected) return { label: "Chờ tài xế nhập mã nhận chuyến", tone: "warning" };
     if (trip.status === "WAITING_PICKUP") return { label: "Chờ lấy hàng", tone: "warning" };
@@ -46,7 +52,7 @@ export default function TripList({ trips, role, hrefFor, renderExtra }) {
                   <StatusBadge size="sm" meta={getTripStatusMeta(trip.status)} />
                   {next && <StatusBadge size="sm" tone={next.tone} label={next.label} />}
                 </Box>
-                <RouteLine compact component="h2" from={trip.pickupLocation} to={trip.deliveryLocation} />
+                <RouteLine compact component="h2" from={formatAddress(trip.pickupLocation)} to={formatAddress(trip.deliveryLocation)} />
                 <Typography variant="body2" className="tabular" sx={{ color: "text.secondary", mt: 0.25 }}>
                   #{shortId(trip.id)} · {formatMoney(trip.agreedPrice)}
                   {trip.expectedDeliveryAt ? ` · hạn giao ${formatDateTime(trip.expectedDeliveryAt)}` : ` · tạo ${formatDateTime(trip.createdAt)}`}
